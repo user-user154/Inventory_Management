@@ -8,7 +8,8 @@
 pos.csv
 recipe.csv
 
-# Python
+# Python（ローカル用スクリプトはリポジトリに含めない）
+*.py
 __pycache__/
 *.pyc
 .venv/
