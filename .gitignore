@@ -4,9 +4,9 @@
 # Cursor / editor
 .cursor/
 
-# ローカル検証用データ（リポジトリに含めない場合）
-pos.csv
-recipe.csv
+# ローカル専用（リポジトリに含めない）
+setup-git.sh
+*.pages
 
 # Python（ローカル用スクリプトはリポジトリに含めない）
 *.py
