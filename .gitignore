@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# Cursor / editor
+.cursor/
+
+# ローカル検証用データ（リポジトリに含めない場合）
+pos.csv
+recipe.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
