@@ -1,0 +1,24 @@
+/**
+ * 0. constants.gs: 全ファイル共通の定数（ここだけで宣言。他ファイルで再宣言しない）
+ */
+
+const SHEET_NAMES = {
+  STOCK_TAKING: "棚卸し表",
+  RAW_MASTER: "原材料マスタ",
+  PREPARATION_RECIPE: "中間レシピ表",
+  RECIPE_MASTER: "レシピ表",
+  BUDGET_ACTUAL: "予算・実績",
+  VENDOR_MASTER: "発注業者マスタ",
+  MANUAL_LOG: "確定指示ログ",
+  MANUAL_ADJUSTMENT_LOG: "AI予測手動調整ログ",
+  POS_RAW: "POSデータ_生",
+  POS_CLEAN: "POSデータ_整形後",
+  ORDER_FORM: "指示書",
+  BACKLOG: "バックログ",
+  FORECAST_DEMAND_LOG: "予測出数ログ",
+  NAME_UNIFY_MASTER: "名寄せマスタ",
+  YIELD_MASTER: "歩留まりマスタ"
+};
+
+const SALES_TAX_RATE = 0.10;
+const POS_SALES_HEADER_EX_TAX = "純売上(税抜)";
