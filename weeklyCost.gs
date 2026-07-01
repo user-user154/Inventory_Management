@@ -1,10 +1,10 @@
 /**
- * 週次原価率（棚卸しベース）— 予算・実績 F1 チェックボックスでのみ実行
+ * 週次原価率（棚卸しベース）— 指示書 A1「④週次原価率計算」+ B1 実行で呼び出し
  *
  * 週次原価率 = (前回棚卸金額 + 期間総仕入れ額 − 今回棚卸金額) ÷ 期間総売上
  * 仕入れ額 = バックログ発注を納品日（発注日+LT）で期間集計した金額
  * 原価率差異 = 週次原価率 − 日次原価率（材料原価率列をフォールバック）
- * 日次原価率（E1）はメニュー出数＋仕込み指示の歩留まりロス＋期限切れ廃棄を含む（coreFunction.gs）
+ * 日次原価率（①計算実行）はメニュー出数＋仕込み指示の歩留まりロス＋期限切れ廃棄を含む（coreFunction.gs）
  */
 
 const STOCK_SNAPSHOT_SHEET_ = "棚卸し履歴";
@@ -13,7 +13,7 @@ const STOCK_TAKING_PREV_DATE_KEY_ = "STOCK_TAKING_PREV_DATE";
 const STOCK_SNAPSHOT_HEADERS_ = ["棚卸日", "商品名", "種別", "数量", "単位"];
 
 /**
- * 週次原価率パイプライン（予算・実績 F1 チェックボックス TRUE 時のみ呼び出し）
+ * 週次原価率パイプライン（指示書 A1/B1 から呼び出し）
  * @return {{ updated: boolean, weeklyRatio: number|null, message: string }}
  */
 const runWeeklyFoodCostRatioPipeline = () => {

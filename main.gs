@@ -3,19 +3,23 @@
  * 定数は constants.gs のみ（main に SHEET_NAMES 等を書かないこと）
  */
 
-/** スプレッドシートを開いたときにカスタムメニューを表示（PC用。スマホは指示書 B1/E1/I1） */
+/** スプレッドシートを開いたときにカスタムメニューを表示（PC用。スマホは指示書 A1/B1） */
 function onOpen() {
   let ss = SpreadsheetApp.getActiveSpreadsheet();
   clearStaleCheckboxSkipProps_();
   ensureOnEditInstallableTrigger_(ss);
 
   let orderSheet = ss.getSheetByName(SHEET_NAMES.ORDER_FORM);
-  if (orderSheet) setupOrderSheetManualInputArea(orderSheet);
+  if (orderSheet) {
+    setupOrderSheetActionControls_(orderSheet);
+    setupOrderSheetManualInputArea(orderSheet);
+    resetStuckOrderSheetCheckboxIfNeeded_(orderSheet);
+    clearLegacySheetTriggerCheckboxes_(orderSheet);
+  }
 
   let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
   if (budgetSheet) {
-    setupBudgetActualWeeklyCostCheckbox(budgetSheet);
-    resetStuckBudgetCheckboxIfNeeded_(budgetSheet);
+    clearLegacySheetTriggerCheckboxes_(budgetSheet);
   }
 
   SpreadsheetApp.getUi()

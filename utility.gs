@@ -1807,21 +1807,89 @@ const loadRawMaterialMasterCached_ = (ss) => {
   return map;
 };
 
-/** 指示書1行目の操作チェックボックス（B1=POS整形, E1=シミュレーション, I1=確定コミット） */
-const ORDER_SHEET_TRIGGER_CELLS = [
-  { row: 1, col: 2, a1: "B1", label: "POSデータの整形", action: "formatPosRawToClean" },
-  { row: 1, col: 5, a1: "E1", label: "シミュレーション", action: "runSimulationPipeline" },
-  { row: 1, col: 9, a1: "I1", label: "確定コミット", action: "commitOrderSheetToBacklogAndLog" }
+/** 指示書 A1=操作プルダウン / B1=実行チェックボックス */
+const ORDER_SHEET_ACTION_DROPDOWN_ = { row: 1, col: 1, a1: "A1" };
+const ORDER_SHEET_B1_TRIGGER_ = { row: 1, col: 2, a1: "B1", label: "実行" };
+
+/** A1 プルダウン選択肢 → 実行関数 */
+const ORDER_SHEET_ACTION_MENU_ = [
+  { label: "①計算実行", action: "runSimulationPipeline" },
+  { label: "②確定コミット", action: "commitOrderSheetToBacklogAndLog" },
+  { label: "③データ整理", action: "formatPosRawToClean" },
+  { label: "④週次原価率計算", action: "runWeeklyFoodCostRatioPipeline" }
 ];
 
-/** 予算・実績1行目 F1=週次原価率更新（D1=期間プルダウン） */
-const BUDGET_ACTUAL_TRIGGER_CELLS = [
-  { row: 1, col: 6, a1: "F1", label: "週次原価率更新", action: "runWeeklyFoodCostRatioPipeline" }
-];
+/** 旧方式のチェックボックス列（E1/I1=指示書, F1=予算・実績）— 開いたときにオフへ */
+const LEGACY_TRIGGER_CHECKBOX_COLS_ = {
+  "指示書": [5, 9],
+  "予算・実績": [6]
+};
 
 const CHECKBOX_SKIP_PROPS_ = {
   ORDER_FORM: "SKIP_ORDER_SHEET_ONEDIT",
   BUDGET_ACTUAL: "SKIP_BUDGET_ACTUAL_ONEDIT"
+};
+
+/** A1 の表示値から実行メニュー項目を解決 */
+const resolveOrderSheetActionMenuItem_ = (sheet) => {
+  if (!sheet) return null;
+  let val = String(sheet.getRange(ORDER_SHEET_ACTION_DROPDOWN_.a1).getValue() || "").trim();
+  for (let i = 0; i < ORDER_SHEET_ACTION_MENU_.length; i++) {
+    if (ORDER_SHEET_ACTION_MENU_[i].label === val) {
+      return ORDER_SHEET_ACTION_MENU_[i];
+    }
+  }
+  return null;
+};
+
+/** 指示書 A1 プルダウンと B1 チェックボックスを整備 */
+const setupOrderSheetActionControls_ = (sheet) => {
+  if (!sheet || sheet.getName() !== SHEET_NAMES.ORDER_FORM) return;
+
+  let props = PropertiesService.getScriptProperties();
+  props.setProperty(CHECKBOX_SKIP_PROPS_.ORDER_FORM, "1");
+  try {
+    let labels = ORDER_SHEET_ACTION_MENU_.map((item) => item.label);
+    let a1 = sheet.getRange(ORDER_SHEET_ACTION_DROPDOWN_.row, ORDER_SHEET_ACTION_DROPDOWN_.col);
+    let current = String(a1.getValue() || "").trim();
+    let rule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(labels, true)
+      .setAllowInvalid(false)
+      .build();
+    a1.setDataValidation(rule);
+    if (labels.indexOf(current) === -1) {
+      a1.setValue(labels[0]);
+    }
+
+    let b1 = sheet.getRange(ORDER_SHEET_B1_TRIGGER_.row, ORDER_SHEET_B1_TRIGGER_.col);
+    if (b1.getDataValidation() == null) {
+      b1.insertCheckboxes();
+      b1.setValue(false);
+    }
+  } finally {
+    props.deleteProperty(CHECKBOX_SKIP_PROPS_.ORDER_FORM);
+  }
+};
+
+/** 旧トリガー列のチェックボックスをオフ（移行用） */
+const clearLegacySheetTriggerCheckboxes_ = (sheet) => {
+  if (!sheet) return;
+  let cols = LEGACY_TRIGGER_CHECKBOX_COLS_[sheet.getName()];
+  if (!cols || cols.length === 0) return;
+
+  let skipKey = sheet.getName() === SHEET_NAMES.ORDER_FORM
+    ? CHECKBOX_SKIP_PROPS_.ORDER_FORM
+    : CHECKBOX_SKIP_PROPS_.BUDGET_ACTUAL;
+  let props = PropertiesService.getScriptProperties();
+  props.setProperty(skipKey, "1");
+  try {
+    cols.forEach((col) => {
+      uncheckRangeSafely(sheet.getRange(1, col));
+    });
+    SpreadsheetApp.flush();
+  } finally {
+    props.deleteProperty(skipKey);
+  }
 };
 
 /** 範囲内のチェックボックスをすべてオフにする */
@@ -1841,14 +1909,9 @@ const uncheckRangeSafely = (range) => {
   if (cleared) SpreadsheetApp.flush();
 };
 
-/** 指示書1行目の操作チェックボックス（B1/E1/I1）をオフにする */
+/** 指示書 B1 実行チェックボックスをオフにする */
 const clearOrderSheetCheckboxes = (sheet) => {
-  clearSheetTriggerCheckboxes_(sheet, ORDER_SHEET_TRIGGER_CELLS, CHECKBOX_SKIP_PROPS_.ORDER_FORM);
-};
-
-/** 予算・実績 F1 チェックボックスをオフにする */
-const clearBudgetActualTriggerCheckboxes = (sheet) => {
-  clearSheetTriggerCheckboxes_(sheet, BUDGET_ACTUAL_TRIGGER_CELLS, CHECKBOX_SKIP_PROPS_.BUDGET_ACTUAL);
+  clearSheetTriggerCheckboxes_(sheet, [ORDER_SHEET_B1_TRIGGER_], CHECKBOX_SKIP_PROPS_.ORDER_FORM);
 };
 
 const clearSheetTriggerCheckboxes_ = (sheet, triggerCells, skipPropKey) => {
@@ -1883,8 +1946,13 @@ const setupSheetTriggerCheckboxes_ = (sheet, triggerCells, skipPropKey) => {
   }
 };
 
-const setupBudgetActualWeeklyCostCheckbox = (sheet) => {
-  setupSheetTriggerCheckboxes_(sheet, BUDGET_ACTUAL_TRIGGER_CELLS, CHECKBOX_SKIP_PROPS_.BUDGET_ACTUAL);
+/** 指示書 B1 がオン固定のまま残っているときにリセット */
+const resetStuckOrderSheetCheckboxIfNeeded_ = (sheet) => {
+  if (!sheet) return;
+  let range = sheet.getRange(ORDER_SHEET_B1_TRIGGER_.row, ORDER_SHEET_B1_TRIGGER_.col);
+  if (range.getValue() === true) {
+    clearOrderSheetCheckboxes(sheet);
+  }
 };
 
 /** 前回異常終了で残ったスキップフラグを除去 */
@@ -1915,16 +1983,6 @@ const ensureOnEditInstallableTrigger_ = (ss) => {
     Logger.log("[トリガー] インストール型 onEdit を作成しました");
   } catch (err) {
     Logger.log(`[トリガー] インストール型 onEdit の作成をスキップ: ${err.message}`);
-  }
-};
-
-/** 予算・実績 F1 がオン固定のまま残っているときにリセット */
-const resetStuckBudgetCheckboxIfNeeded_ = (sheet) => {
-  if (!sheet) return;
-  let cell = BUDGET_ACTUAL_TRIGGER_CELLS[0];
-  let range = sheet.getRange(cell.row, cell.col);
-  if (range.getValue() === true) {
-    clearBudgetActualTriggerCheckboxes(sheet);
   }
 };
 

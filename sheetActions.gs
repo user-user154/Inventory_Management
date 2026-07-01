@@ -1,7 +1,8 @@
 /**
  * 5. sheet_actions.gs: チェックボックス連動（onEdit）— 計算は TRUE 時のみ手動実行
  *
- * 指示書 B1/E1/I1 / 予算・実績 F1 のチェックボックスがオフ→オンになったときだけ処理を実行。
+ * 指示書 A1=操作プルダウン / B1=実行チェックボックス。
+ * B1 がオフ→オンのとき、A1 で選んだ処理だけ実行する。
  * 手動入力エリア O2:Q5（生樽・炭酸ガス）の編集では onEdit による書換えは行わない。
  */
 
@@ -47,37 +48,41 @@ const handleSpreadsheetEdit_ = (e) => {
     if (sheetName === SHEET_NAMES.ORDER_FORM) {
       // 生樽・炭酸ガス手入力（O2:Q5）は onEdit で書換えしない（確定コミット前に消えないよう保護）
       if (isOrderSheetManualInputEdit_(e)) return;
-      if (isCheckboxSkipActive_(CHECKBOX_SKIP_PROPS_.ORDER_FORM, e, ORDER_SHEET_TRIGGER_CELLS)) return;
-      dispatchSheetCheckboxAction_(e, sheet, ORDER_SHEET_TRIGGER_CELLS, CHECKBOX_SKIP_PROPS_.ORDER_FORM);
+      let triggerCells = [ORDER_SHEET_B1_TRIGGER_];
+      if (isCheckboxSkipActive_(CHECKBOX_SKIP_PROPS_.ORDER_FORM, e, triggerCells)) return;
+      dispatchOrderSheetAction_(e, sheet);
       return;
-    }
-
-    if (sheetName === SHEET_NAMES.BUDGET_ACTUAL) {
-      if (isCheckboxSkipActive_(CHECKBOX_SKIP_PROPS_.BUDGET_ACTUAL, e, BUDGET_ACTUAL_TRIGGER_CELLS)) return;
-      dispatchSheetCheckboxAction_(e, sheet, BUDGET_ACTUAL_TRIGGER_CELLS, CHECKBOX_SKIP_PROPS_.BUDGET_ACTUAL);
     }
   } finally {
     lock.releaseLock();
   }
 };
 
-/** チェックボックス TRUE（オフ→オン）で action を実行し、終了後 FALSE に戻す */
-const dispatchSheetCheckboxAction_ = (e, sheet, triggerCells, skipPropKey) => {
+/** 指示書 B1: A1 で選んだ操作を実行 */
+const dispatchOrderSheetAction_ = (e, sheet) => {
+  let triggerCells = [ORDER_SHEET_B1_TRIGGER_];
   let trigger = isSheetCheckboxTriggerEdit_(e, triggerCells);
   if (!trigger) return;
 
-  let actionFn = getCheckboxAction_(trigger.action);
-  if (!actionFn) {
-    Logger.log(`[チェックボックス] 未登録 action: ${trigger.action}`);
+  let menuItem = resolveOrderSheetActionMenuItem_(sheet);
+  if (!menuItem) {
+    notifyUser("A1 で実行する操作を選択してください。", "指示書");
+    clearSheetTriggerCheckboxes_(sheet, triggerCells, CHECKBOX_SKIP_PROPS_.ORDER_FORM);
     return;
   }
 
-  runCheckboxAction_(sheet, trigger, function() {
+  let actionFn = getCheckboxAction_(menuItem.action);
+  if (!actionFn) {
+    Logger.log(`[チェックボックス] 未登録 action: ${menuItem.action}`);
+    return;
+  }
+
+  runCheckboxAction_(sheet, ORDER_SHEET_B1_TRIGGER_, () => {
     let result = actionFn();
-    if (trigger.action === "runWeeklyFoodCostRatioPipeline" && result) {
-      notifyUser(result.message || "週次原価率の処理が完了しました", trigger.label);
+    if (menuItem.action === "runWeeklyFoodCostRatioPipeline" && result) {
+      notifyUser(result.message || "週次原価率の処理が完了しました", menuItem.label);
     }
-  }, trigger.label, skipPropKey);
+  }, menuItem.label, CHECKBOX_SKIP_PROPS_.ORDER_FORM);
 };
 
 /** メニュー・手動実行用: D2 と A5〜 から曜日列を一括更新 */
@@ -507,7 +512,7 @@ const writePosCleanSheet = (cleanSheet, rows) => {
 };
 
 /**
- * I1 確定コミット: バックログへ最終反映 + 手動調整を AI予測手動調整ログ へ出力
+ * 確定コミット: バックログへ最終反映 + 手動調整を AI予測手動調整ログ へ出力
  */
 const commitOrderSheetToBacklogAndLog = () => {
   let ss = SpreadsheetApp.getActiveSpreadsheet();
