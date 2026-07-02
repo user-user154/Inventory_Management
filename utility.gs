@@ -1940,6 +1940,8 @@ const clearSheetFromRow = (sheet, startRow, startCol, numCols) => {
 
 /** 指示書の仕込み・発注データ行の開始行 */
 const ORDER_SHEET_DATA_START_ROW = 4;
+const ORDER_SHEET_ALT_BG_GRAY = "#f3f3f3";
+const ORDER_SHEET_ALT_BG_WHITE = "#ffffff";
 
 const AI_SNAPSHOT_PROP_PREFIX = "AI_SNAPSHOT_";
 
@@ -2034,8 +2036,21 @@ const clearOrderSheetSimulationBlocks_ = (sheet) => {
   let lastRow = sheet.getLastRow();
   if (lastRow < startRow) return;
   let numRows = lastRow - startRow + 1;
-  sheet.getRange(startRow, 1, numRows, 6).clearContent();
-  sheet.getRange(startRow, 8, numRows, 6).clearContent();
+  sheet.getRange(startRow, 1, numRows, 6).clearContent().setBackground(ORDER_SHEET_ALT_BG_WHITE);
+  sheet.getRange(startRow, 8, numRows, 6).clearContent().setBackground(ORDER_SHEET_ALT_BG_WHITE);
+};
+
+/** 指示書データ行へ交互背景色（グレー/白）を適用 */
+const applyOrderSheetAlternatingBackgrounds_ = (sheet, startRow, startCol, numRows, numCols) => {
+  if (!sheet || numRows <= 0 || numCols <= 0) return;
+  let backgrounds = [];
+  for (let r = 0; r < numRows; r++) {
+    let rowColor = (r % 2 === 0) ? ORDER_SHEET_ALT_BG_GRAY : ORDER_SHEET_ALT_BG_WHITE;
+    let row = [];
+    for (let c = 0; c < numCols; c++) row.push(rowColor);
+    backgrounds.push(row);
+  }
+  sheet.getRange(startRow, startCol, numRows, numCols).setBackgrounds(backgrounds);
 };
 
 /** 指示書 O4:Q5 から手動発注行を読み取る */
@@ -2587,9 +2602,11 @@ const outputToOrderSheet = (sheet, todayResults, ctx) => {
 
     if (leftRows.length > 0) {
       writeSheetRows(sheet, ORDER_SHEET_DATA_START_ROW, 1, leftRows);
+      applyOrderSheetAlternatingBackgrounds_(sheet, ORDER_SHEET_DATA_START_ROW, 1, leftRows.length, 6);
     }
     if (rightRows.length > 0) {
       writeSheetRows(sheet, ORDER_SHEET_DATA_START_ROW, 8, rightRows);
+      applyOrderSheetAlternatingBackgrounds_(sheet, ORDER_SHEET_DATA_START_ROW, 8, rightRows.length, 6);
     }
     restoreOrderSheetManualInput_(sheet, manualSnapshot);
   } finally {
