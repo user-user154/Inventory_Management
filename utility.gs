@@ -644,6 +644,43 @@ const getInventoryDateStrFromSheet_ = () => {
   return formatJstDate_(inventoryVal);
 };
 
+/** 棚卸し日が指示書 B2 より前（前日棚卸し等）か */
+const isInventoryPriorToOrderDay_ = (ctx) => {
+  if (!ctx || !ctx.inventoryDateStr || !ctx.orderDate) return false;
+  return ctx.inventoryDateStr < formatJstDate_(ctx.orderDate);
+};
+
+/** 指示書 B2 に対応する simulationResults の日インデックス */
+const getOrderDayIndexInCtx_ = (ctx) => {
+  if (!ctx || !ctx.orderDate) return 0;
+  return clampDayIndex_(
+    getOrderSheetDayIndex(ctx.orderDate, ctx.periodMode || "当日", ctx.targetDate),
+    ctx.simDays
+  );
+};
+
+/** 棚卸し表の数量を原材料最小単位マップへ（発注判定の在庫リセット用） */
+const buildRawStockFromInventorySheet_ = (ctx) => {
+  let stock = {};
+  Object.keys(ctx.rawMaster).forEach((rName) => {
+    let rawRow = ctx.rawMaster[rName];
+    let stockEntry = ctx.stockObj[rName];
+    let initialQty = stockEntry ? stockEntry.qty : 0;
+    let initialUnit = stockEntry ? stockEntry.unit : (rawRow.orderUnit || rawRow.lotUnit || "個");
+    stock[rName] = convertToMinUnit(initialQty, initialUnit, rawRow);
+  });
+  return stock;
+};
+
+/** 発注投影用の空入荷バッファ（納品加算を無効化） */
+const emptyDailyBufferedAmounts_ = (simDays) => {
+  let arr = [];
+  for (let i = 0; i < simDays; i++) {
+    arr.push({});
+  }
+  return arr;
+};
+
 /**
  * 月跨ぎ時にバックログへ残す最古日付（yyyy-MM-dd）
  * - 通常: 棚卸し月の1日以降のみ保持（それ以前は削除）
@@ -1071,6 +1108,26 @@ const precomputeVendorDeliveryCaches_ = (ctx, holidayCache) => {
 
 const LOT14_TARGET_KG = 14;
 
+/** 仕入先が中野製麺か */
+const NAKANO_VENDOR_NAME_ = "中野製麺";
+
+const isNakanoVendor_ = (rawRow) => {
+  return String(rawRow && rawRow.vendor || "").trim() === NAKANO_VENDOR_NAME_;
+};
+
+/**
+ * 中野製麺の1発注単位あたりkg（14kg合算用）
+ * つけだれ/もみだれ/塩だれ/味噌だれ/ヤンジャン=1kg、冷麺=200g、冷麺スープ=2kg
+ * @return {number|null} 該当なしは null
+ */
+const rawKgPerOrderUnitForNakano_ = (rName) => {
+  let n = String(rName || "");
+  if (n.indexOf("冷麺スープ") !== -1) return 2;
+  if (n.indexOf("冷麺") !== -1) return 0.2;
+  if (/つけだれ|もみだれ|塩だれ|味噌だれ|ヤンジャン|ヤンニャン/.test(n)) return 1;
+  return null;
+};
+
 /** 原材料の発注量（最小単位）を kg 換算 */
 const rawOrderQtyToKg = (minUnitQty, rawRow, rName) => {
   if (!rawRow) return 0;
@@ -1085,9 +1142,13 @@ const rawOrderQtyToKg = (minUnitQty, rawRow, rName) => {
   return 0;
 };
 
-/** 1発注単位あたりの14kg換算重量(kg)。原材料マスタ列 → ロット単位 → 既定換算 */
+/** 1発注単位あたりの14kg換算重量(kg)。中野製麺は商品名ルール → マスタ列 → ロット単位 → 既定換算 */
 const rawKgPerOrderUnit_ = (rawRow, rName) => {
   if (!rawRow) return 0;
+  if (isNakanoVendor_(rawRow)) {
+    let nakanoKg = rawKgPerOrderUnitForNakano_(rName);
+    if (nakanoKg != null) return nakanoKg;
+  }
   if (Number(rawRow.lot14KgPerOrderUnit) > 0) return Number(rawRow.lot14KgPerOrderUnit);
   let lotQty = Number(rawRow.lotQty) || 1;
   let lotUnitRaw = String(rawRow.lotUnit).trim();
@@ -1165,7 +1226,7 @@ const canAddLot14Pack_ = (
   let del = resolveVendorOrderDeliveryDay(orderDayIdx, vCal, ctx, holidayCache);
   let projected = stockBase;
   if (del.allowed) {
-    projected = projectRawStockAtDay(
+    projected = projectRawStockAtDeliveryStart_(
       precomputed, dailyBuffered, rName, orderDayIdx, del.deliveryDayIdx, stockBase
     );
   }

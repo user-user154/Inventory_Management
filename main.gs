@@ -56,10 +56,18 @@ const runSimulationPipeline = () => {
   let inventoryVal = stockSheet ? stockSheet.getRange("B1").getValue() : null;
   let inventoryDate = (inventoryVal && !isNaN(new Date(inventoryVal).getTime())) ? new Date(inventoryVal) : null;
 
-  // 在庫基準点は棚卸し表B1。B1以降は理論在庫で計算する。
+  // 在庫基準点は棚卸し表B1。数量は棚卸し表を優先し、B1が前日以前なら指示書日から理論在庫を進める。
+  let orderDateStr = formatJstDate_(orderDate);
+  let inventoryDateStr = inventoryDate ? formatJstDate_(inventoryDate) : null;
   let simStartDate = inventoryDate || getSimulationStartDate(orderDate, period);
   if (inventoryDate && inventoryDate.getTime() > orderDate.getTime()) {
     throw new Error(`棚卸し表B1（${formatJstDate_(inventoryDate)}）より前の日付を指示書B2（${formatJstDate_(orderDate)}）で計算しようとしています。B2 を棚卸し日以降にしてください。`);
+  }
+  if (inventoryDateStr && inventoryDateStr < orderDateStr) {
+    if (period === "当日") {
+      simStartDate = new Date(orderDate.getTime());
+    }
+    Logger.log(`[run] 棚卸し前日基準: 在庫=${inventoryDateStr} 計算開始=${formatJstDate_(simStartDate)}（棚卸し優先・納品加算なし）`);
   }
 
   let vendorSheet = ss.getSheetByName(SHEET_NAMES.VENDOR_MASTER);
