@@ -5,7 +5,8 @@
  *   1 発注単位 (orderUnit) ＝ 1 包装 ＝ 商品ロット (lotQty) × 商品ロット単位 (lotUnit)
  *   例: キャベツ … lotQty=1, lotUnit=kg, orderUnit=パック → 1パック=1kg=1000g
  *   最低在庫(minStock)は「発注単位」基準 → 最小単位 = minStock × lotSizeToMinUnit(lotQty, lotUnit)
- *   最大在庫(maxStock)も「発注単位」基準 → 納品時見込在庫+発注量が上限を超えないよう切り下げ
+ *   最大在庫(maxStock)も「発注単位」基準 … 納品時（入荷後・当日消費前）にこれ以上抱えられない上限。
+ *   発注量は不足分を満たしつつこの上限以下に収める（上限ぎりぎりが常態とは限らない）。
  */
 
 const normalizeUnitKey = (unitStr) => {
@@ -644,10 +645,10 @@ const getInventoryDateStrFromSheet_ = () => {
   return formatJstDate_(inventoryVal);
 };
 
-/** 棚卸し日が指示書 B2 より前（前日棚卸し等）か */
-const isInventoryPriorToOrderDay_ = (ctx) => {
+/** 棚卸し日が指示書 B2 の前日か（前日棚卸し運用） */
+const isInventoryExactlyPriorDay_ = (ctx) => {
   if (!ctx || !ctx.inventoryDateStr || !ctx.orderDate) return false;
-  return ctx.inventoryDateStr < formatJstDate_(ctx.orderDate);
+  return ctx.inventoryDateStr === addDaysToDateStr_(formatJstDate_(ctx.orderDate), -1);
 };
 
 /** 指示書 B2 に対応する simulationResults の日インデックス */
@@ -670,15 +671,6 @@ const buildRawStockFromInventorySheet_ = (ctx) => {
     stock[rName] = convertToMinUnit(initialQty, initialUnit, rawRow);
   });
   return stock;
-};
-
-/** 発注投影用の空入荷バッファ（納品加算を無効化） */
-const emptyDailyBufferedAmounts_ = (simDays) => {
-  let arr = [];
-  for (let i = 0; i < simDays; i++) {
-    arr.push({});
-  }
-  return arr;
 };
 
 /**
@@ -1128,18 +1120,25 @@ const rawKgPerOrderUnitForNakano_ = (rName) => {
   return null;
 };
 
-/** 原材料の発注量（最小単位）を kg 換算 */
-const rawOrderQtyToKg = (minUnitQty, rawRow, rName) => {
+/** 最小単位量 → kg（14kg合算の加算・集計でロットサイズとkg換算を一致させる） */
+const rawMinUnitQtyToKg_ = (minUnitQty, rawRow, rName) => {
   if (!rawRow) return 0;
   let onePackMin = lotSizeToMinUnit(rawRow.lotQty, rawRow.lotUnit);
   if (onePackMin <= 0) return 0;
-  let packs = minUnitQty / onePackMin;
   let kgPerPack = rawKgPerOrderUnit_(rawRow, rName);
-  if (kgPerPack > 0) return packs * kgPerPack;
+  if (kgPerPack > 0) {
+    return (minUnitQty / onePackMin) * kgPerPack;
+  }
   let lotU = normalizeUnitKey(rawRow.lotUnit);
+  let packs = minUnitQty / onePackMin;
   if (lotU === "kg") return packs * (Number(rawRow.lotQty) || 1);
   if (lotU === "g") return packs * (Number(rawRow.lotQty) || 1) / 1000;
   return 0;
+};
+
+/** 原材料の発注量（最小単位）を kg 換算 */
+const rawOrderQtyToKg = (minUnitQty, rawRow, rName) => {
+  return rawMinUnitQtyToKg_(minUnitQty, rawRow, rName);
 };
 
 /** 1発注単位あたりの14kg換算重量(kg)。中野製麺は商品名ルール → マスタ列 → ロット単位 → 既定換算 */
@@ -1208,36 +1207,234 @@ const ensureLot14OrderEntry_ = (todayOrders, rName, rawRow, orderDayIdx, ctx, ho
   };
 };
 
-/** 最大在庫に基づく発注可能量（最小単位）。maxStock<=0 なら null（上限なし） */
-const maxOrderQtyByMaxStockMinUnit_ = (rawRow, onePackMin, stockAtDeliveryMinUnit) => {
+// ===== DEBUG_SHIODARE_START（デバッグ用・削除可） =====
+const DEBUG_SHIODARE_TRACK_ENABLED_ = true;
+const DEBUG_SHIODARE_RAW_NAME_ = "塩だれ";
+const DEBUG_AWASE_SHIODARE_PREP_NAME_ = "合わせ塩だれ";
+
+/** 発注計算・14kg合算のトラック対象（原材料「塩だれ」のみ） */
+const isDebugShiodareOrderTarget_ = (rName) => {
+  return DEBUG_SHIODARE_TRACK_ENABLED_ && rName === DEBUG_SHIODARE_RAW_NAME_;
+};
+
+const isDebugShiodareTarget_ = isDebugShiodareOrderTarget_;
+
+const formatDebugRawMinQty_ = (rName, minQty, ctx) => {
+  let rawRow = ctx && ctx.rawMaster ? ctx.rawMaster[rName] : null;
+  if (!rawRow) return Math.round(minQty) + "min";
+  let packMin = lotSizeToMinUnit(rawRow.lotQty, rawRow.lotUnit);
+  let g = Math.round(minQty);
+  if (packMin > 0) {
+    let packs = (minQty / packMin).toFixed(2);
+    return g + "g(" + packs + (rawRow.orderUnit || "箱") + ")";
+  }
+  return g + "g";
+};
+
+const tracePrepContributionsToRaw_ = (rawName, prepDemand, inProcess, ctx) => {
+  let parts = [];
+  Object.keys(inProcess || {}).forEach((pName) => {
+    let partial = {};
+    expandPrepLotsToRaw(pName, inProcess[pName].lotCount, ctx, partial, inProcess, []);
+    let amt = partial[rawName] || 0;
+    if (amt > 1e-6) {
+      parts.push(pName + "=" + Math.round(amt));
+    }
+  });
+  return parts.length > 0 ? parts.join(",") : "(なし)";
+};
+
+const describePrepUsesRawPerLot_ = (prepName, rawName, ctx) => {
+  let prep = ctx && ctx.preparationRecipes ? ctx.preparationRecipes[prepName] : null;
+  if (!prep || !prep.ingredients) return "";
+  let parts = [];
+  prep.ingredients.forEach((ing) => {
+    let target = routeUnifiedMaterial_(ing.name, ctx);
+    if (target.name !== rawName && ing.name !== rawName) return;
+    parts.push(ing.qty + (ing.unit || "") + "/仕込みロット");
+  });
+  return parts.join("+") || "";
+};
+
+const logDebugShiodare_ = (stage, label, fields) => {
+  if (!DEBUG_SHIODARE_TRACK_ENABLED_) return;
+  let parts = [`[DEBUG塩だれ] ${stage}`, `対象=${label}`];
+  Object.keys(fields || {}).forEach((k) => {
+    parts.push(`${k}=${fields[k]}`);
+  });
+  Logger.log(parts.join(" | "));
+};
+
+const trackDebugShiodareDailyDemand_ = (ctx, payload) => {
+  if (!DEBUG_SHIODARE_TRACK_ENABLED_ || !ctx) return;
+
+  let rawName = DEBUG_SHIODARE_RAW_NAME_;
+  let prepName = DEBUG_AWASE_SHIODARE_PREP_NAME_;
+  let rawRow = ctx.rawMaster[rawName];
+
+  let directMin = (payload.directRawConsumption && payload.directRawConsumption[rawName]) || 0;
+  let prepMin = (payload.prepRawConsumption && payload.prepRawConsumption[rawName]) || 0;
+  let totalMin = (payload.rawConsumption && payload.rawConsumption[rawName]) || 0;
+  let prepContrib = tracePrepContributionsToRaw_(
+    rawName, payload.prepDemand, payload.inProcess, ctx
+  );
+
+  logDebugShiodare_("日次消費", rawName, {
+    日付: payload.date || "",
+    売上: Math.round(payload.salesAmount || 0),
+    仕込み倍率: payload.prepFactor != null ? payload.prepFactor.toFixed(3) : "",
+    メニュー直接: formatDebugRawMinQty_(rawName, directMin, ctx),
+    仕込み経由: formatDebugRawMinQty_(rawName, prepMin, ctx),
+    合計消費: formatDebugRawMinQty_(rawName, totalMin, ctx),
+    仕込み内訳: prepContrib
+  });
+
+  let awaseDemand = (payload.prepDemand && payload.prepDemand[prepName]) || 0;
+  let awaseProc = payload.inProcess ? payload.inProcess[prepName] : null;
+  let awaseFields = {
+    日付: payload.date || "",
+    売上: Math.round(payload.salesAmount || 0),
+    仕込み倍率: payload.prepFactor != null ? payload.prepFactor.toFixed(3) : "",
+    需要量: Math.round(awaseDemand)
+  };
+  if (awaseProc) {
+    awaseFields.ロット数 = awaseProc.lotCount;
+    awaseFields.仕込み量 = Math.round(awaseProc.aiQty) + (awaseProc.unit || "");
+  }
+  let recipeNote = describePrepUsesRawPerLot_(prepName, rawName, ctx);
+  if (recipeNote) awaseFields.塩だれレシピ = recipeNote;
+  logDebugShiodare_("日次仕込み", prepName, awaseFields);
+};
+
+const trackDebugShiodareCalcStart_ = (rName, rawRow, orderDayIdx, stockAfterConsumption, ctx, orderOptions) => {
+  if (!isDebugShiodareOrderTarget_(rName)) return;
+  logDebugShiodare_("calc開始", rName, {
+    発注日: ctx.targetDatesStr[orderDayIdx] || "",
+    業者: rawRow.vendor || "",
+    在庫min: Math.round(stockAfterConsumption),
+    maxStock: Number(rawRow.maxStock) || 0,
+    minStock: Number(rawRow.minStock) || 0,
+    ロット: `${rawRow.lotQty || ""}${rawRow.lotUnit || ""}`,
+    納品加算スキップ: orderOptions && orderOptions.skipDeliveryBuffered ? "yes" : "no"
+  });
+};
+
+const trackDebugShiodareCalcMid_ = (rName, fields) => {
+  if (!isDebugShiodareOrderTarget_(rName)) return;
+  logDebugShiodare_("calc中間", rName, fields);
+};
+
+const trackDebugShiodareCalcEnd_ = (rName, rawRow, result) => {
+  if (!isDebugShiodareOrderTarget_(rName)) return result;
+  if (!result || result.skipped) {
+    logDebugShiodare_("calc終了", rName, {
+      skipped: "yes",
+      detail: result ? (result.detail || "") : "null"
+    });
+    return result;
+  }
+  let display = formatOrderSheetOrderQty_(result.aiQty, rawRow, rName);
+  logDebugShiodare_("calc終了", rName, {
+    skipped: "no",
+    aiQtyMin: Math.round(result.aiQty),
+    表示: `${display.qty}${display.unit}`,
+    納品日idx: result.deliveryDayIdx,
+    区間消費min: Math.round(result.coverConsumption || 0),
+    納品朝在庫min: Math.round(result.stockAtDeliveryForOrder || 0),
+    reason: result.reason || ""
+  });
+  return result;
+};
+
+const trackDebugShiodareLot14_ = (rName, stage, fields) => {
+  if (!isDebugShiodareOrderTarget_(rName)) return;
+  logDebugShiodare_(stage, rName, fields);
+};
+
+const trackDebugShiodareFinal_ = (dateStr, rName, item, rawRow) => {
+  if (!isDebugShiodareOrderTarget_(rName) || !item) return;
+  let display = formatOrderSheetOrderQty_(item.aiQty, rawRow, rName);
+  logDebugShiodare_("指示書確定", rName, {
+    日付: dateStr,
+    aiQtyMin: Math.round(item.aiQty),
+    表示: `${display.qty}${display.unit}`,
+    reason: item.reason || ""
+  });
+};
+// ===== DEBUG_SHIODARE_END =====
+
+/** 納品時点（入荷後・当日消費前）の在庫上限（最小単位）。maxStock<=0 なら null */
+const maxStockMinUnitAtDelivery_ = (rawRow) => {
   let maxUnits = Number(rawRow.maxStock) || 0;
-  if (maxUnits <= 0 || onePackMin <= 0) return null;
-  let maxMin = maxUnits * onePackMin;
+  if (maxUnits <= 0) return null;
+  let packMin = lotSizeToMinUnit(rawRow.lotQty, rawRow.lotUnit);
+  if (packMin <= 0) return null;
+  return maxUnits * packMin;
+};
+
+/**
+ * 納品時在庫 + 発注量が最大在庫を超えるか
+ * @param {number} stockAtDeliveryMinUnit 納品朝（入荷前）の見込在庫
+ * @param {number} orderMinUnitAtDelivery その納品日に入る発注量の合計（最小単位）
+ */
+const wouldExceedMaxStockAtDelivery_ = (rawRow, stockAtDeliveryMinUnit, orderMinUnitAtDelivery) => {
+  let maxMin = maxStockMinUnitAtDelivery_(rawRow);
+  if (maxMin === null) return false;
+  let stock = Math.max(0, Number(stockAtDeliveryMinUnit) || 0);
+  let orderQty = Math.max(0, Number(orderMinUnitAtDelivery) || 0);
+  return stock + orderQty > maxMin + 1e-6;
+};
+
+/** 納品時点で最大在庫を超えないよう発注量（最小単位）を切り下げ */
+const capOrderQtyByMaxStockAtDelivery_ = (rName, rawRow, stockAtDeliveryMinUnit, desiredOrderMinUnit) => {
+  let maxMin = maxStockMinUnitAtDelivery_(rawRow);
+  if (maxMin === null) return desiredOrderMinUnit;
+
+  let stock = Math.max(0, Number(stockAtDeliveryMinUnit) || 0);
+  let desired = Math.max(0, Number(desiredOrderMinUnit) || 0);
+  let orderLotSize = resolveRawOrderLotSizeMinUnit_(rName, rawRow);
+  if (orderLotSize <= 0) return desired;
+
+  let headroom = Math.max(0, maxMin - stock);
+  if (headroom <= 1e-6) return 0;
+
+  let maxLots = Math.floor(headroom / orderLotSize);
+  if (maxLots <= 0) return 0;
+
+  let maxAllowed = maxLots * orderLotSize;
+  return desired <= maxAllowed + 1e-6 ? desired : maxAllowed;
+};
+
+/** @deprecated capOrderQtyByMaxStockAtDelivery_ の headroom 算出用 */
+const maxOrderQtyByMaxStockMinUnit_ = (rawRow, onePackMin, stockAtDeliveryMinUnit) => {
+  let maxMin = maxStockMinUnitAtDelivery_(rawRow);
+  if (maxMin === null) return null;
   let stock = Math.max(0, Number(stockAtDeliveryMinUnit) || 0);
   return Math.max(0, maxMin - stock);
 };
 
 const canAddLot14Pack_ = (
-  rName, rawRow, onePackMin, orderDayIdx, todayOrders, currentStock, ctx, dailyBuffered, precomputed, holidayCache
+  rName, rawRow, onePackMin, orderDayIdx, todayOrders, currentStock, ctx, dailyBuffered, precomputed, holidayCache, lot14Options
 ) => {
+  lot14Options = lot14Options || {};
+  let skipDeliveryBuffered = !!lot14Options.skipDeliveryBuffered;
   let ordered = todayOrders[rName] ? todayOrders[rName].aiQty : 0;
   let stockBase = currentStock[rName] || 0;
   let vCal = ctx.vendorCalendars[rawRow.vendor];
   let del = resolveVendorOrderDeliveryDay(orderDayIdx, vCal, ctx, holidayCache);
-  let projected = stockBase;
+  let stockAtDelivery = stockBase;
   if (del.allowed) {
-    projected = projectRawStockAtDeliveryStart_(
-      precomputed, dailyBuffered, rName, orderDayIdx, del.deliveryDayIdx, stockBase
+    stockAtDelivery = projectRawStockAtDeliveryStart_(
+      precomputed, dailyBuffered, rName, orderDayIdx, del.deliveryDayIdx, stockBase, skipDeliveryBuffered
     );
   }
-  let headroom = maxOrderQtyByMaxStockMinUnit_(rawRow, onePackMin, projected);
-  if (headroom === null) return true;
-  return (ordered + onePackMin) <= headroom + 1e-6;
+  let nextOrderMin = ordered + onePackMin;
+  return !wouldExceedMaxStockAtDelivery_(rawRow, stockAtDelivery, nextOrderMin);
 }
 
 /** 不足分を優先順位1→2→3で1発注単位ずつ追加（最大在庫超過時は次の優先へ） */
 const fillLot14DeficitKg_ = (
-  todayOrders, pool, deficitKg, orderDayIdx, currentStock, ctx, dailyBuffered, precomputed, holidayCache
+  todayOrders, pool, deficitKg, orderDayIdx, currentStock, ctx, dailyBuffered, precomputed, holidayCache, lot14Options
 ) => {
   let remain = deficitKg;
   let addedLog = [];
@@ -1253,18 +1450,29 @@ const fillLot14DeficitKg_ = (
       let onePack = lotSizeToMinUnit(rawRow.lotQty, rawRow.lotUnit);
       if (kgPerPack <= 0 || onePack <= 0) continue;
       let blockedByMax = false;
-      while (remain > 0.001) {
+      let guard = 0;
+      while (remain > 0.001 && guard < 200) {
+        guard++;
+        let addedKg = rawMinUnitQtyToKg_(onePack, rawRow, rName);
+        if (addedKg <= 1e-9) break;
         if (!canAddLot14Pack_(
           rName, rawRow, onePack, orderDayIdx, todayOrders, currentStock, ctx,
-          dailyBuffered, precomputed, holidayCache
+          dailyBuffered, precomputed, holidayCache, lot14Options
         )) {
           blockedByMax = true;
           break;
         }
         ensureLot14OrderEntry_(todayOrders, rName, rawRow, orderDayIdx, ctx, holidayCache);
         todayOrders[rName].aiQty += onePack;
-        remain -= kgPerPack;
+        remain -= addedKg;
         addedLog.push(rName + "+" + (rawRow.orderUnit || "箱"));
+        if (isDebugShiodareOrderTarget_(rName)) {
+          trackDebugShiodareLot14_(rName, "14kg+1箱", {
+            aiQtyMin: Math.round(todayOrders[rName].aiQty),
+            addedKg: addedKg.toFixed(3),
+            remainKg: remain.toFixed(3)
+          });
+        }
       }
       if (blockedByMax && remain > 0.001) {
         addedLog.push(rName + "(最大在庫上限)");
@@ -1280,8 +1488,9 @@ const fillLot14DeficitKg_ = (
  * 不足分は原材料マスタの優先順位1→2→3・最大在庫に従い追加
  */
 const applyVendor14KgLotRule = (
-  todayOrders, ctx, orderDayIdx, currentStock, dailyBuffered, precomputed, holidayCache
+  todayOrders, ctx, orderDayIdx, currentStock, dailyBuffered, precomputed, holidayCache, lot14Options
 ) => {
+  lot14Options = lot14Options || {};
   if (!todayOrders || !ctx || !ctx.vendorCalendars) return;
 
   Object.keys(ctx.vendorCalendars).forEach((vendor) => {
@@ -1305,9 +1514,20 @@ const applyVendor14KgLotRule = (
     let deficitKg = targetKg - totalKg;
     if (deficitKg <= 0.001) return;
 
+    pool.forEach((p) => {
+      if (!isDebugShiodareOrderTarget_(p.rName)) return;
+      let before = todayOrders[p.rName];
+      trackDebugShiodareLot14_(p.rName, "14kg合算前", {
+        aiQtyMin: before ? Math.round(before.aiQty) : 0,
+        totalKg: totalKg.toFixed(1),
+        targetKg: targetKg,
+        deficitKg: deficitKg.toFixed(3)
+      });
+    });
+
     let fill = fillLot14DeficitKg_(
       todayOrders, pool, deficitKg, orderDayIdx, currentStock, ctx,
-      dailyBuffered, precomputed, holidayCache
+      dailyBuffered, precomputed, holidayCache, lot14Options
     );
     let note = " [14kg合算: " + totalKg.toFixed(1) + "kg→" + targetKg + "kg";
     if (fill.addedLog.length > 0) note += " 追加:" + fill.addedLog.join(", ");
@@ -1317,6 +1537,13 @@ const applyVendor14KgLotRule = (
     pool.forEach((p) => {
       let order = todayOrders[p.rName];
       if (order && order.aiQty > 0) order.reason = (order.reason || "") + note;
+      if (isDebugShiodareTarget_(p.rName)) {
+        trackDebugShiodareLot14_(p.rName, "14kg合算後", {
+          aiQtyMin: order ? Math.round(order.aiQty) : 0,
+          addedLog: fill.addedLog.join(",") || "(なし)",
+          remainKg: fill.remainKg.toFixed(3)
+        });
+      }
     });
   });
 }
@@ -1385,6 +1612,21 @@ const resolveDailySalesBase_ = (ba) => {
     return { amount: Number(ba.actual) || 0, baseFlag: "実績ベース" };
   }
   return { amount: Number(ba.budget) || 0, baseFlag: "予算ベース" };
+};
+
+/**
+ * 仕込み需要の売上倍率: 当日売上基準 + 翌日予算の50%
+ * （翌日は予算列のみ。実績は混ぜない）
+ */
+const resolvePrepDemandSalesFactor_ = (ctx, dayIdx, dateStr) => {
+  let salesBase = resolveDailySalesBase_(ctx.budgetActualData[dateStr]);
+  let factor = salesBase.amount || 0;
+  if (!ctx.targetDatesStr || dayIdx + 1 >= ctx.targetDatesStr.length) {
+    return factor;
+  }
+  let nextBa = ctx.budgetActualData[ctx.targetDatesStr[dayIdx + 1]];
+  let nextBudget = nextBa ? (Number(nextBa.budget) || 0) : 0;
+  return factor + nextBudget * 0.5;
 };
 
 /**
@@ -1477,11 +1719,12 @@ const expandPrepToRawMinQty_ = (prepName, lotMultiplier, ctx, rawMinQty, pathSta
       let nestedMultiplier;
       if (nestedMode === "lotCount") {
         if (inProcess && inProcess[target.name]) {
-          nestedMultiplier = inProcess[target.name].lotCount;
-        } else {
-          let lotSize = Number(nestedPrep.finishedQty) || 1;
-          nestedMultiplier = calcPrepLotAndAmount(qty, lotSize).lotCount;
+          // 別途仕込み指示がある中間品は、親展開では原材料まで落とさない（二重計上防止）
+          return;
         }
+        let nestedFinished = prepIngredientQtyToFinishedQty_(qty, ing.unit, nestedPrep, target.name, ctx);
+        let nestedLotSize = Number(nestedPrep.finishedQty) || 1;
+        nestedMultiplier = nestedFinished / nestedLotSize;
       } else {
         let nestedFinished = prepIngredientQtyToFinishedQty_(qty, ing.unit, nestedPrep, target.name, ctx);
         let nestedLotSize = Number(nestedPrep.finishedQty) || 1;
@@ -1528,11 +1771,12 @@ const accumulatePrepYieldLossRaw_ = (prepName, lotMultiplier, ctx, rawMinQty, pa
       let nestedMultiplier;
       if (nestedMode === "lotCount") {
         if (inProcess && inProcess[target.name]) {
-          nestedMultiplier = inProcess[target.name].lotCount;
-        } else {
-          let lotSize = Number(nestedPrep.finishedQty) || 1;
-          nestedMultiplier = calcPrepLotAndAmount(qty, lotSize).lotCount;
+          // 別途仕込み指示がある中間品は、親展開では原材料まで落とさない（二重計上防止）
+          return;
         }
+        let nestedFinished = prepIngredientQtyToFinishedQty_(qty, ing.unit, nestedPrep, target.name, ctx);
+        let nestedLotSize = Number(nestedPrep.finishedQty) || 1;
+        nestedMultiplier = nestedFinished / nestedLotSize;
       } else {
         let nestedFinished = prepIngredientQtyToFinishedQty_(qty, ing.unit, nestedPrep, target.name, ctx);
         let nestedLotSize = Number(nestedPrep.finishedQty) || 1;
@@ -2201,14 +2445,6 @@ const resolvePrepAmountAsKg_ = (prepAmount, prepMasterRow, rule) => {
   return ((amount / lotSize) * gramsPerServing) / 1000;
 };
 
-/** 備考欄用の kg 表示（小数1桁まで、整数なら小数なし） */
-const formatPrepKgForRemark_ = (kg) => {
-  if (kg <= 0) return "0kg";
-  let rounded = Math.round(kg * 10) / 10;
-  if (Math.abs(rounded - Math.round(rounded)) < 1e-6) return Math.round(rounded) + "kg";
-  return rounded + "kg";
-};
-
 /** 1人前あたりのグラム数（中間レシピ・原材料マスタから解決、未設定時は150g） */
 const resolvePrepGramsPerServing_ = (prepMasterRow, rule, ctx) => {
   if (rule && Number(rule.gramsPerServing) > 0) return Number(rule.gramsPerServing);
@@ -2308,8 +2544,7 @@ const formatPrepOrderSheetDisplay_ = (prepName, item, prepMasterRow) => {
     if (tappers < 1) tappers = 1;
     return {
       qty: tappers,
-      unit: "タッパー",
-      remarkExtra: "出数" + formatPrepKgForRemark_(predictedKg)
+      unit: "タッパー"
     };
   }
 
@@ -2331,9 +2566,7 @@ const outputToOrderSheet = (sheet, todayResults, ctx) => {
     let display = formatPrepOrderSheetDisplay_(name, item, prepMasterRow);
     if (!display || display.qty <= 0) return;
 
-    let remark = todayResults.baseFlag || "予算ベース";
-    if (display.remarkExtra) remark += " / " + display.remarkExtra;
-    leftRows.push([name, display.qty, display.unit, remark, "", ""]);
+    leftRows.push([name, display.qty, display.unit, "", "", ""]);
   });
 
   Object.keys(todayResults.orders).forEach((name) => {

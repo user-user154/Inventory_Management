@@ -228,7 +228,7 @@ const executeCoreSimulation = (ctx) => {
   let consumptionPrefixSums = buildConsumptionPrefixSums_(precomputedConsumption, rawNames);
   let activeRawNames = filterActiveRawNamesForOrder_(rawNames, ctx, currentStock, consumptionPrefixSums);
   let orderDayIdx = getOrderDayIndexInCtx_(ctx);
-  let inventoryPriorMode = isInventoryPriorToOrderDay_(ctx);
+  let inventoryPriorMode = isInventoryExactlyPriorDay_(ctx);
 
   for (let d = 0; d < ctx.simDays; d++) {
     let dateStr = ctx.targetDatesStr[d];
@@ -236,9 +236,11 @@ const executeCoreSimulation = (ctx) => {
     let baseFlag = dayDemand.baseFlag;
     let inProcess = dayDemand.inProcess;
     let todayConsumption = dayDemand.rawConsumption;
+    let inventoryStockSnapshot = null;
 
     if (inventoryPriorMode && d === orderDayIdx) {
       currentStock = buildRawStockFromInventorySheet_(ctx);
+      inventoryStockSnapshot = Object.assign({}, currentStock);
     }
 
     let todayResults = {
@@ -269,17 +271,21 @@ const executeCoreSimulation = (ctx) => {
       }
     });
 
+    let orderOptions = {};
+    if (inventoryPriorMode && d === orderDayIdx) {
+      orderOptions.skipDeliveryBuffered = true;
+    }
+
     for (let ri = 0; ri < activeRawNames.length; ri++) {
       let rName = activeRawNames[ri];
       let rawRow = ctx.rawMaster[rName];
-      let stockVal = currentStock[rName] || 0;
+      let stockVal = inventoryStockSnapshot
+        ? (inventoryStockSnapshot[rName] || 0)
+        : Math.max(0, currentStock[rName] || 0);
 
-      let bufferedForOrder = (inventoryPriorMode && d === orderDayIdx)
-        ? emptyDailyBufferedAmounts_(ctx.simDays)
-        : dailyTotalBufferedAmounts;
       let orderPlan = calcForwardLookingOrderQty(
-        rName, rawRow, d, stockVal, ctx, bufferedForOrder, precomputedConsumption,
-        holidayCache, consumptionPrefixSums
+        rName, rawRow, d, stockVal, ctx, dailyTotalBufferedAmounts, precomputedConsumption,
+        holidayCache, consumptionPrefixSums, orderOptions
       );
       if (!orderPlan || orderPlan.skipped || orderPlan.aiQty <= 0) {
         continue;
@@ -294,13 +300,21 @@ const executeCoreSimulation = (ctx) => {
       };
     }
 
-    let bufferedForLot14 = (inventoryPriorMode && d === orderDayIdx)
-      ? emptyDailyBufferedAmounts_(ctx.simDays)
-      : dailyTotalBufferedAmounts;
+    let lot14Options = {};
+    if (inventoryPriorMode && d === orderDayIdx) {
+      lot14Options.skipDeliveryBuffered = true;
+    }
     applyVendor14KgLotRule(
       todayResults.orders, ctx, d, currentStock,
-      bufferedForLot14, precomputedConsumption, holidayCache
+      dailyTotalBufferedAmounts, precomputedConsumption, holidayCache, lot14Options
     );
+
+    if (d === orderDayIdx) {
+      Object.keys(todayResults.orders).forEach((rName) => {
+        if (!isDebugShiodareOrderTarget_(rName)) return;
+        trackDebugShiodareFinal_(dateStr, rName, todayResults.orders[rName], ctx.rawMaster[rName]);
+      });
+    }
 
     Object.keys(todayResults.orders).forEach((rName) => {
       let item = todayResults.orders[rName];
@@ -458,9 +472,12 @@ const collectNestedPrepInstructions = (inProcess, ctx) => {
         if (Number(nestedPrep.stopFlag) === 1) return; // 停止仕込みは追加しない
         let need = ing.qty * parentLots;
         if (need <= 0) return;
+        // 子仕込みの単位で必要量を評価しないと、少量でも1ロット過大に切り上がる。
+        let nestedNeed = prepIngredientQtyToFinishedQty_(need, ing.unit, nestedPrep, ing.name, ctx);
+        if (!(nestedNeed > 0)) return;
 
         let lotSize = Number(nestedPrep.finishedQty) || 1;
-        let calc = calcPrepLotAndAmount(need, lotSize);
+        let calc = calcPrepLotAndAmount(nestedNeed, lotSize);
         if (calc.lotCount <= 0) return;
 
         if (!inProcess[ing.name] || inProcess[ing.name].lotCount < calc.lotCount) {
@@ -468,7 +485,7 @@ const collectNestedPrepInstructions = (inProcess, ctx) => {
             aiQty: calc.prepAmount,
             lotCount: calc.lotCount,
             unit: nestedPrep.processUnit || "g",
-            demand: need
+            demand: nestedNeed
           };
           changed = true;
         }
@@ -481,8 +498,7 @@ const collectNestedPrepInstructions = (inProcess, ctx) => {
  * メニュー起点の仕込み需要のみ原材料へ展開（inProcess 全件ループによる二重計上を避ける）
  */
 const expandPrepsToRaw = (prepDemand, inProcess, ctx, rawConsumption) => {
-  Object.keys(prepDemand).forEach((pName) => {
-    if (!inProcess[pName]) return;
+  Object.keys(inProcess || {}).forEach((pName) => {
     expandPrepLotsToRaw(pName, inProcess[pName].lotCount, ctx, rawConsumption, inProcess, []);
   });
 };
@@ -666,7 +682,12 @@ const finalizeDailyDemandsFromScaled_ = (ctx, prepDemand, directRawDemand) => {
     rawConsumption[rName] = (rawConsumption[rName] || 0) + prepRawConsumption[rName];
   });
 
-  return { inProcess: inProcess, rawConsumption: rawConsumption };
+  return {
+    inProcess: inProcess,
+    rawConsumption: rawConsumption,
+    prepRawConsumption: prepRawConsumption,
+    directRawConsumption: Object.assign({}, directRawDemand)
+  };
 };
 
 const computeDailyDemandsDetailed = (ctx, baseAmount, dayIdx) => {
@@ -759,13 +780,14 @@ const precomputeDailyDemands = (ctx, unitMenuDemands, unitCostRawDemand, unitPre
   let byDay = [];
   let prepLots = initPrepLotInventory_(ctx);
   let orderDayIdx = getOrderDayIndexInCtx_(ctx);
-  let inventoryPriorMode = isInventoryPriorToOrderDay_(ctx);
+  let inventoryPriorMode = isInventoryExactlyPriorDay_(ctx);
 
   for (let d = 0; d < ctx.simDays; d++) {
     let dateStr = ctx.targetDatesStr[d];
     let salesBase = resolveDailySalesBase_(ctx.budgetActualData[dateStr]);
     let factor = salesBase.amount || 0;
-    let prepDemand = scaleDemandMap_(unit.prepDemand, factor);
+    let prepFactor = resolvePrepDemandSalesFactor_(ctx, d, dateStr);
+    let prepDemand = scaleDemandMap_(unit.prepDemand, prepFactor);
     let directRawDemand = scaleDemandMap_(unit.directRawDemand, factor);
 
     let wastePrepQty = purgeExpiredPrepLots_(prepLots, dateStr, ctx);
@@ -788,6 +810,20 @@ const precomputeDailyDemands = (ctx, unitMenuDemands, unitCostRawDemand, unitPre
       calcDailyRawMaterialCost_(rawOutputDemand, ctx.rawMaster),
       factor
     );
+
+    trackDebugShiodareDailyDemand_(ctx, {
+      date: dateStr,
+      dayIdx: d,
+      salesAmount: factor,
+      salesFactor: factor,
+      prepFactor: prepFactor,
+      baseFlag: salesBase.baseFlag,
+      prepDemand: prepDemand,
+      inProcess: finalized.inProcess,
+      directRawConsumption: finalized.directRawConsumption,
+      prepRawConsumption: finalized.prepRawConsumption,
+      rawConsumption: finalized.rawConsumption
+    });
 
     byDay.push({
       date: dateStr,
@@ -844,10 +880,10 @@ const sumRawConsumptionRange = (precomputed, rName, fromDayIdx, toDayIdxExclusiv
  * （各日: 入荷加算 → 消費減算、シミュレーション本体と同順）
  * 帳簿マイナスは現場在庫0として扱う（過剰発注防止）
  */
-const projectRawStockAtDay = (precomputed, dailyBuffered, rName, fromDayIdx, toDayIdx, startStock) => {
+const projectRawStockAtDay = (precomputed, dailyBuffered, rName, fromDayIdx, toDayIdx, startStock, skipDeliveryBuffered) => {
   let stock = Math.max(0, Number(startStock) || 0);
   for (let d = fromDayIdx + 1; d <= toDayIdx; d++) {
-    if (dailyBuffered[d] && dailyBuffered[d][rName]) {
+    if (!skipDeliveryBuffered && dailyBuffered[d] && dailyBuffered[d][rName]) {
       stock += dailyBuffered[d][rName];
     }
     stock -= precomputed[d][rName] || 0;
@@ -862,19 +898,19 @@ const projectRawStockAtDay = (precomputed, dailyBuffered, rName, fromDayIdx, toD
  * これにより前日発注分の入荷予定を正しく差し引き、到着前日の二重発注を防ぐ。
  */
 const projectRawStockAtDeliveryStart_ = (
-  precomputed, dailyBuffered, rName, fromDayIdx, deliveryDayIdx, startStock
+  precomputed, dailyBuffered, rName, fromDayIdx, deliveryDayIdx, startStock, skipDeliveryBuffered
 ) => {
   if (deliveryDayIdx <= fromDayIdx) {
     let stock = Math.max(0, Number(startStock) || 0);
-    if (dailyBuffered[deliveryDayIdx] && dailyBuffered[deliveryDayIdx][rName]) {
+    if (!skipDeliveryBuffered && dailyBuffered[deliveryDayIdx] && dailyBuffered[deliveryDayIdx][rName]) {
       stock += dailyBuffered[deliveryDayIdx][rName];
     }
     return stock;
   }
   let stock = projectRawStockAtDay(
-    precomputed, dailyBuffered, rName, fromDayIdx, deliveryDayIdx - 1, startStock
+    precomputed, dailyBuffered, rName, fromDayIdx, deliveryDayIdx - 1, startStock, skipDeliveryBuffered
   );
-  if (dailyBuffered[deliveryDayIdx] && dailyBuffered[deliveryDayIdx][rName]) {
+  if (!skipDeliveryBuffered && dailyBuffered[deliveryDayIdx] && dailyBuffered[deliveryDayIdx][rName]) {
     stock += dailyBuffered[deliveryDayIdx][rName];
   }
   return stock;
@@ -909,31 +945,34 @@ const findNextVendorDeliveryDayIdxCore_ = (currentDeliveryDayIdx, lt, ctx, vCal,
  * stockAfterConsumption: 発注判定日の消費反映後在庫
  */
 const calcForwardLookingOrderQty = (
-  rName, rawRow, orderDayIdx, stockAfterConsumption, ctx, dailyBuffered, precomputed, holidayCache, prefixSums
+  rName, rawRow, orderDayIdx, stockAfterConsumption, ctx, dailyBuffered, precomputed, holidayCache, prefixSums, orderOptions
 ) => {
+  orderOptions = orderOptions || {};
+  let skipDeliveryBuffered = !!orderOptions.skipDeliveryBuffered;
+  trackDebugShiodareCalcStart_(rName, rawRow, orderDayIdx, stockAfterConsumption, ctx, orderOptions);
   if (shouldSkipRawAutoOrder_(rawRow, rName)) {
-    return { skipped: true, detail: Number(rawRow.stopFlag) === 1
+    return trackDebugShiodareCalcEnd_(rName, rawRow, { skipped: true, detail: Number(rawRow.stopFlag) === 1
       ? "原材料停止フラグ=1"
-      : "自動発注対象外（" + rName + "）" };
+      : "自動発注対象外（" + rName + "）" });
   }
 
   let vCal = ctx.vendorCalendars[rawRow.vendor];
   if (!vCal) {
-    return { skipped: true, detail: "業者「" + rawRow.vendor + "」未登録" };
+    return trackDebugShiodareCalcEnd_(rName, rawRow, { skipped: true, detail: "業者「" + rawRow.vendor + "」未登録" });
   }
   if (Number(vCal.stopFlag) === 1) {
-    return { skipped: true, detail: "業者停止フラグ=1（" + rawRow.vendor + "）" };
+    return trackDebugShiodareCalcEnd_(rName, rawRow, { skipped: true, detail: "業者停止フラグ=1（" + rawRow.vendor + "）" });
   }
 
   let minUnitLotSize = lotSizeToMinUnit(rawRow.lotQty, rawRow.lotUnit);
   if (minUnitLotSize <= 0) {
-    return { skipped: true, detail: "ロットサイズ不正" };
+    return trackDebugShiodareCalcEnd_(rName, rawRow, { skipped: true, detail: "ロットサイズ不正" });
   }
 
   let minSafetyMinUnit = (Number(rawRow.minStock) || 0) * minUnitLotSize;
   let deliveryCheck = resolveVendorOrderDeliveryDay(orderDayIdx, vCal, ctx, holidayCache);
   if (!deliveryCheck.allowed) {
-    return { skipped: true, detail: deliveryCheck.detail };
+    return trackDebugShiodareCalcEnd_(rName, rawRow, { skipped: true, detail: deliveryCheck.detail });
   }
   let lt = deliveryCheck.leadTime;
   let deliveryDayIdx = deliveryCheck.deliveryDayIdx;
@@ -943,58 +982,89 @@ const calcForwardLookingOrderQty = (
     precomputed, rName, deliveryDayIdx, nextDeliveryDayIdx, prefixSums
   );
   let stockAtDelivery = projectRawStockAtDeliveryStart_(
-    precomputed, dailyBuffered, rName, orderDayIdx, deliveryDayIdx, stockAfterConsumption
+    precomputed, dailyBuffered, rName, orderDayIdx, deliveryDayIdx, stockAfterConsumption, skipDeliveryBuffered
   );
   let stockAtDeliveryForOrder = stockAtDelivery;
-
-  let targetStock = coverConsumption + minSafetyMinUnit;
-  let neededMinUnit = targetStock - stockAtDeliveryForOrder;
 
   let deliveryDateStr = ctx.targetDatesStr[deliveryDayIdx];
   let nextDeliveryDateStr = nextDeliveryDayIdx < ctx.simDays
     ? ctx.targetDatesStr[nextDeliveryDayIdx]
     : "期間末";
 
+  let targetStock = coverConsumption + minSafetyMinUnit;
+  let neededMinUnit = targetStock - stockAtDeliveryForOrder;
+
+  if (isDebugShiodareOrderTarget_(rName)) {
+    let dailyParts = [];
+    for (let dd = deliveryDayIdx; dd < nextDeliveryDayIdx && dd < precomputed.length; dd++) {
+      dailyParts.push(
+        (ctx.targetDatesStr[dd] || dd) + ":" + Math.round(precomputed[dd][rName] || 0)
+      );
+    }
+    trackDebugShiodareCalcMid_(rName, {
+      納品日: deliveryDateStr,
+      翌納品日: nextDeliveryDateStr,
+      区間消費min: Math.round(coverConsumption),
+      区間日次消費min: dailyParts.join(","),
+      安全在庫min: Math.round(minSafetyMinUnit),
+      納品朝在庫min: Math.round(stockAtDeliveryForOrder),
+      不足min: Math.round(neededMinUnit)
+    });
+  }
+
   if (neededMinUnit <= 0) {
-    return {
+    return trackDebugShiodareCalcEnd_(rName, rawRow, {
       skipped: true,
       detail: "納品" + deliveryDateStr + "〜" + nextDeliveryDateStr + "前 消費"
         + Math.round(coverConsumption) + "+安全在庫" + Math.round(minSafetyMinUnit)
         + " | 納品朝見込在庫" + Math.round(stockAtDeliveryForOrder)
         + "→発注不要"
-    };
+    });
   }
 
   let orderLotSize = resolveRawOrderLotSizeMinUnit_(rName, rawRow);
   let orderLots = Math.ceil(neededMinUnit / orderLotSize);
-  let aiQty = orderLots * orderLotSize;
+  let aiQtyUncapped = orderLots * orderLotSize;
+  let aiQty = aiQtyUncapped;
   let maxStockNote = "";
+  let maxMin = maxStockMinUnitAtDelivery_(rawRow);
+  let maxStockHeadroom = maxMin !== null
+    ? Math.max(0, maxMin - Math.max(0, stockAtDeliveryForOrder))
+    : null;
 
-  let maxOrderHeadroom = maxOrderQtyByMaxStockMinUnit_(rawRow, minUnitLotSize, stockAtDeliveryForOrder);
-  if (maxOrderHeadroom !== null) {
-    if (maxOrderHeadroom <= 1e-6) {
-      return {
-        skipped: true,
-        detail: "納品" + deliveryDateStr + " 見込在庫" + Math.round(stockAtDeliveryForOrder)
-          + "≥最大在庫" + (Number(rawRow.maxStock) || 0) + (rawRow.orderUnit || "箱") + "→発注不可"
-      };
-    }
-    let maxLots = Math.floor(maxOrderHeadroom / orderLotSize);
-    if (maxLots <= 0) {
-      return {
-        skipped: true,
-        detail: "納品" + deliveryDateStr + " 最大在庫" + (Number(rawRow.maxStock) || 0)
-          + (rawRow.orderUnit || "箱") + "の余裕不足→発注不可"
-      };
-    }
-    if (orderLots > maxLots) {
-      orderLots = maxLots;
-      aiQty = orderLots * orderLotSize;
-      maxStockNote = " 最大在庫上限" + (Number(rawRow.maxStock) || 0) + (rawRow.orderUnit || "箱");
-    }
+  let cappedQty = capOrderQtyByMaxStockAtDelivery_(
+    rName, rawRow, stockAtDeliveryForOrder, aiQty
+  );
+  if (cappedQty <= 1e-6 && aiQty > 1e-6) {
+    return trackDebugShiodareCalcEnd_(rName, rawRow, {
+      skipped: true,
+      detail: "納品" + deliveryDateStr + " 入荷後見込"
+        + Math.round(stockAtDeliveryForOrder + aiQty)
+        + ">" + (Number(rawRow.maxStock) || 0) + (rawRow.orderUnit || "箱")
+        + "（最大在庫上限）→発注不可"
+    });
+  }
+  if (cappedQty + 1e-6 < aiQty) {
+    aiQty = cappedQty;
+    orderLots = orderLotSize > 0 ? aiQty / orderLotSize : 0;
+    maxStockNote = " 最大在庫上限" + (Number(rawRow.maxStock) || 0) + (rawRow.orderUnit || "箱");
   }
 
-  return {
+  if (isDebugShiodareOrderTarget_(rName)) {
+    trackDebugShiodareCalcMid_(rName, {
+      理論発注min: Math.round(aiQtyUncapped),
+      最大在庫余力min: maxStockHeadroom !== null ? Math.round(maxStockHeadroom) : "なし",
+      キャップ後発注min: Math.round(aiQty)
+    });
+  }
+
+  let stockAfterReceipt = Math.round(stockAtDeliveryForOrder + aiQty);
+  let maxStockUnits = Number(rawRow.maxStock) || 0;
+  let stockNote = maxStockUnits > 0
+    ? "(納品入荷後見込" + stockAfterReceipt + "/" + maxStockUnits + (rawRow.orderUnit || "箱") + "上限)→"
+    : "(納品入荷後見込" + stockAfterReceipt + ")→";
+
+  return trackDebugShiodareCalcEnd_(rName, rawRow, {
     skipped: false,
     aiQty: aiQty,
     orderLots: orderLots,
@@ -1008,9 +1078,9 @@ const calcForwardLookingOrderQty = (
     vendor: rawRow.vendor,
     reason: "納品" + deliveryDateStr + "〜翌納品" + nextDeliveryDateStr + "前の消費"
       + Math.round(coverConsumption) + "+安全在庫" + Math.round(minSafetyMinUnit)
-      + "(納品朝見込" + Math.round(stockAtDeliveryForOrder) + ")→"
+      + stockNote
       + orderLots + (rawRow.orderUnit || "箱") + maxStockNote,
     detail: "→発注対象 " + orderLots + (rawRow.orderUnit || "箱") + maxStockNote
       + "（納品" + deliveryDateStr + " 区間消費" + Math.round(coverConsumption) + "）"
-  };
+  });
 }

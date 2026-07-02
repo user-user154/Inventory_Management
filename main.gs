@@ -63,7 +63,7 @@ const runSimulationPipeline = () => {
   if (inventoryDate && inventoryDate.getTime() > orderDate.getTime()) {
     throw new Error(`棚卸し表B1（${formatJstDate_(inventoryDate)}）より前の日付を指示書B2（${formatJstDate_(orderDate)}）で計算しようとしています。B2 を棚卸し日以降にしてください。`);
   }
-  if (inventoryDateStr && inventoryDateStr < orderDateStr) {
+  if (inventoryDateStr && inventoryDateStr === addDaysToDateStr_(orderDateStr, -1)) {
     if (period === "当日") {
       simStartDate = new Date(orderDate.getTime());
     }
