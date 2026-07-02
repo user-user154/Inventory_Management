@@ -1946,22 +1946,22 @@ const ORDER_SHEET_ALT_BG_WHITE = "#ffffff";
 const AI_SNAPSHOT_PROP_PREFIX = "AI_SNAPSHOT_";
 
 /**
- * 指示書 手動入力エリア（O2:Q5）
- * O2=見出し / O3=原材料名 / O4-O5=プルダウン（生樽・炭酸ガス）
- * P3=数量 / P4-P5=数量 / Q3=単位 / Q4-Q5=単位（本で固定）
+ * 指示書 手動入力エリア（O2:Q15）
+ * O2=見出し / O3=原材料名 / O4-O15=手動調整項目（プルダウン含む）
+ * P3=数量 / P4-P15=数量 / Q3=単位 / Q4-Q15=単位
  */
 const ORDER_SHEET_MANUAL_INPUT = {
   labelRow: 2,
   headerRow: 3,
   dataStartRow: 4,
-  dataEndRow: 5,
+  dataEndRow: 15,
   nameCol: 15,
   qtyCol: 16,
   unitCol: 17,
   dropdownItems: ["生樽", "炭酸ガス"]
 };
 
-/** 指示書 O2:Q5 の見出しとプルダウンを整備 */
+/** 指示書 O2:Q15 の見出しとプルダウンを整備 */
 const setupOrderSheetManualInputArea = (sheet) => {
   if (!sheet || sheet.getName() !== SHEET_NAMES.ORDER_FORM) return;
 
@@ -1978,21 +1978,19 @@ const setupOrderSheetManualInputArea = (sheet) => {
       .requireValueInList(cfg.dropdownItems, true)
       .setAllowInvalid(false)
       .build();
-    let numDataRows = cfg.dataEndRow - cfg.dataStartRow + 1;
-    sheet.getRange(cfg.dataStartRow, cfg.nameCol, numDataRows, 1).setDataValidation(rule);
+    // 既存運用の固定行（O4:O5）のみバリデーションを付与し、O6:O15 はユーザー設定を保持する。
+    sheet.getRange(4, cfg.nameCol, 2, 1).setDataValidation(rule);
 
-    // 生樽・炭酸ガスは単位「本」固定（onEdit での自動書換えはしない）
-    let unitVals = sheet.getRange(cfg.dataStartRow, cfg.unitCol, numDataRows, 1).getValues();
-    let nextUnits = unitVals.map((row) => {
-      return [String(row[0]).trim() ? row[0] : "本"];
-    });
-    sheet.getRange(cfg.dataStartRow, cfg.unitCol, numDataRows, 1).setValues(nextUnits);
+    // 生樽・炭酸ガスの固定行は初期単位を「本」に揃える。
+    let unitVals = sheet.getRange(4, cfg.unitCol, 2, 1).getValues();
+    let nextUnits = unitVals.map((row) => [String(row[0]).trim() || "本"]);
+    sheet.getRange(4, cfg.unitCol, 2, 1).setValues(nextUnits);
   } finally {
     props.deleteProperty(CHECKBOX_SKIP_PROPS_.ORDER_FORM);
   }
 };
 
-/** 手動入力エリア（O2:Q5）のセルか */
+/** 手動入力エリア（O2:Q15）のセルか */
 const isOrderSheetManualInputAreaCell_ = (row, col) => {
   let cfg = ORDER_SHEET_MANUAL_INPUT;
   return row >= cfg.labelRow && row <= cfg.dataEndRow
@@ -2014,7 +2012,7 @@ const isOrderSheetManualInputEdit_ = (e) => {
   return false;
 };
 
-/** 手動入力エリア O2:Q5 のスナップショット */
+/** 手動入力エリア O2:Q15 のスナップショット */
 const snapshotOrderSheetManualInput_ = (sheet) => {
   let cfg = ORDER_SHEET_MANUAL_INPUT;
   let numRows = cfg.dataEndRow - cfg.labelRow + 1;
@@ -2027,6 +2025,61 @@ const restoreOrderSheetManualInput_ = (sheet, snapshot) => {
   let cfg = ORDER_SHEET_MANUAL_INPUT;
   let numRows = snapshot.length;
   sheet.getRange(cfg.labelRow, cfg.nameCol, numRows, 3).setValues(snapshot);
+};
+
+/** 手動入力名から単位を解決（生樽・炭酸ガスは本固定） */
+const resolveOrderSheetManualInputUnit_ = (name, rawMaster) => {
+  let itemName = String(name || "").trim();
+  if (!itemName) return "";
+  if (itemName === "生樽" || itemName === "炭酸ガス") return "本";
+  let rawRow = rawMaster && rawMaster[itemName] ? rawMaster[itemName] : null;
+  return rawRow && rawRow.orderUnit ? String(rawRow.orderUnit).trim() : "";
+};
+
+/** onEdit: O列の選択内容から Q列の単位を自動入力 */
+const syncOrderSheetManualInputUnits_ = (e) => {
+  if (!e || !e.range) return;
+  let range = e.range;
+  let sheet = range.getSheet();
+  if (!sheet || sheet.getName() !== SHEET_NAMES.ORDER_FORM) return;
+
+  let cfg = ORDER_SHEET_MANUAL_INPUT;
+  let editedStartCol = range.getColumn();
+  let editedEndCol = editedStartCol + range.getNumColumns() - 1;
+  if (editedStartCol > cfg.nameCol || editedEndCol < cfg.nameCol) return;
+
+  let editedStartRow = range.getRow();
+  let editedEndRow = editedStartRow + range.getNumRows() - 1;
+  let rowStart = Math.max(cfg.dataStartRow, editedStartRow);
+  let rowEnd = Math.min(cfg.dataEndRow, editedEndRow);
+  if (rowEnd < rowStart) return;
+
+  let numRows = rowEnd - rowStart + 1;
+  let names = sheet.getRange(rowStart, cfg.nameCol, numRows, 1).getValues();
+  let units = sheet.getRange(rowStart, cfg.unitCol, numRows, 1).getValues();
+  let rawMaster = loadRawMaterialMasterCached_(sheet.getParent());
+  let changed = false;
+
+  for (let i = 0; i < numRows; i++) {
+    let name = String(names[i][0] || "").trim();
+    if (!name) {
+      if (String(units[i][0] || "").trim() !== "") {
+        units[i][0] = "";
+        changed = true;
+      }
+      continue;
+    }
+    let resolvedUnit = resolveOrderSheetManualInputUnit_(name, rawMaster);
+    if (!resolvedUnit) continue;
+    if (String(units[i][0] || "").trim() !== resolvedUnit) {
+      units[i][0] = resolvedUnit;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    sheet.getRange(rowStart, cfg.unitCol, numRows, 1).setValues(units);
+  }
 };
 
 /** シミュレーション出力対象のみクリア（仕込み A:F / 発注 H:M）。手動入力 O:Q は触らない */
@@ -2053,7 +2106,7 @@ const applyOrderSheetAlternatingBackgrounds_ = (sheet, startRow, startCol, numRo
   sheet.getRange(startRow, startCol, numRows, numCols).setBackgrounds(backgrounds);
 };
 
-/** 指示書 O4:Q5 から手動発注行を読み取る */
+/** 指示書 O4:Q15 から手動発注行を読み取る */
 const readOrderSheetManualEntries = (orderSheet, ctx) => {
   let cfg = ORDER_SHEET_MANUAL_INPUT;
   let entries = [];

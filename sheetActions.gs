@@ -3,7 +3,7 @@
  *
  * 指示書 A1=操作プルダウン / B1=実行チェックボックス。
  * B1 がオフ→オンのとき、A1 で選んだ処理だけ実行する。
- * 手動入力エリア O2:Q5（生樽・炭酸ガス）の編集では onEdit による書換えは行わない。
+ * 手動入力エリア O2:Q15（手動調整項目）の編集は、O列の選択に応じた単位自動入力のみ行う。
  */
 
 /** チェックボックス action 名 → 実行関数（初回参照時に解決。const の TDZ / ファイル読込順を避ける） */
@@ -46,8 +46,11 @@ const handleSpreadsheetEdit_ = (e) => {
     let sheetName = sheet.getName();
 
     if (sheetName === SHEET_NAMES.ORDER_FORM) {
-      // 生樽・炭酸ガス手入力（O2:Q5）は onEdit で書換えしない（確定コミット前に消えないよう保護）
-      if (isOrderSheetManualInputEdit_(e)) return;
+      // 手動入力エリアでは O列の選択項目に応じた単位自動入力のみ実行する。
+      if (isOrderSheetManualInputEdit_(e)) {
+        syncOrderSheetManualInputUnits_(e);
+        return;
+      }
       let triggerCells = [ORDER_SHEET_B1_TRIGGER_];
       if (isCheckboxSkipActive_(CHECKBOX_SKIP_PROPS_.ORDER_FORM, e, triggerCells)) return;
       dispatchOrderSheetAction_(e, sheet);
@@ -582,7 +585,7 @@ function resetBacklogRelatedHistory() {
   );
 }
 
-/** 指示書から手動調整ログ対象行を収集（AI予測との差分・変更量・理由・O4:Q5手動入力） */
+/** 指示書から手動調整ログ対象行を収集（AI予測との差分・変更量・理由・O4:Q15手動入力） */
 const collectManualAdjustmentEntries = (orderSheet, aiSnapshot, rawMaster) => {
   let entries = [];
   ["仕込み", "発注"].forEach((category) => {
