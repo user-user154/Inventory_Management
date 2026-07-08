@@ -24,10 +24,10 @@ const SHEET_NAMES = {
 const SALES_TAX_RATE = 0.10;
 const POS_SALES_HEADER_EX_TAX = "純売上(税抜)";
 
-/** スマレジ・プラットフォームAPI 接続先（契約IDはシークレットではないためここに置く。
- *  クライアントID/シークレットはスクリプトプロパティ SMAREGI_CLIENT_ID / SMAREGI_CLIENT_SECRET） */
+/** スマレジ・プラットフォームAPI 接続先（本番。契約IDはシークレットではないためここに置く。
+ *  クライアントID/シークレットはスクリプトプロパティ POS_CLIENT_ID / POS_CLIENT_SECRET） */
 const SMAREGI_CONFIG = {
-  contractId: "sb_skt584z8",
-  idBase: "https://id.smaregi.dev",
-  apiBase: "https://api.smaregi.dev"
+  contractId: "spy565k6",
+  idBase: "https://id.smaregi.jp",
+  apiBase: "https://api.smaregi.jp"
 };
