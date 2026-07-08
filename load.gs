@@ -57,7 +57,13 @@ const buildSimulationContext = (simStartDate, simDays, periodMode, orderDate, op
     posTotalSalesQty += Number(r.salesQty) || 0;
   });
 
-  let actualSalesLogData = loadActualSalesLogData(ss.getSheetByName(SHEET_NAMES.ACTUAL_SALES_LOG));
+  let actualSalesLogData = {};
+  try {
+    let selectedStore = resolveSelectedSmaregiStore_(budgetSheet);
+    actualSalesLogData = loadActualSalesLogData(ss.getSheetByName(SHEET_NAMES.ACTUAL_SALES_LOG), selectedStore.storeId);
+  } catch (err) {
+    Logger.log(`[実績出数] 対象店舗が未選択のため実績データはスキップ: ${err.message}`);
+  }
 
   let backlogSheet = ss.getSheetByName(SHEET_NAMES.BACKLOG);
   let backlogMeta = backlogSheet ? findSheetHeaderMeta(backlogSheet, ["日付", "商材名", "分類"]) : null;
@@ -396,23 +402,27 @@ const loadPosCleanData = (sheet) => {
 };
 
 /**
- * 実績出数ログ（日付|統一商品名|販売点数|純売上(税抜)）を日付ごとにグルーピング
+ * 実績出数ログ（日付|店舗|統一商品名|販売点数|純売上(税抜)）を日付ごとにグルーピング。
+ * storeId を指定した場合はその店舗の行だけに絞り込む（複数店舗分が同じシートに同居するため）。
  * @return {{[dateStr:string]: {menuName:string, salesQty:number, salesAmount:number}[]}}
  */
-const loadActualSalesLogData = (sheet) => {
+const loadActualSalesLogData = (sheet, storeId) => {
   let data = {};
   if (!sheet) return data;
 
-  let meta = findHeaderRowAndIndices(sheet, ["日付", "統一商品名", "販売点数", POS_SALES_HEADER_EX_TAX]);
+  let meta = findHeaderRowAndIndices(sheet, ["日付", "店舗", "統一商品名", "販売点数", POS_SALES_HEADER_EX_TAX]);
   if (!meta) return data;
 
   let idxDate = meta.headers.indexOf("日付");
+  let idxStore = meta.headers.indexOf("店舗");
   let idxName = meta.headers.indexOf("統一商品名");
   let idxQty = meta.headers.indexOf("販売点数");
   let idxSales = meta.headers.indexOf(POS_SALES_HEADER_EX_TAX);
 
   for (let i = meta.dataStartRow; i < meta.fullData.length; i++) {
     let row = meta.fullData[i];
+    if (storeId != null && String(row[idxStore]) !== String(storeId)) continue;
+
     let dateKey = formatSheetDateToKey(row[idxDate]);
     let name = String(row[idxName] || "").trim();
     if (!dateKey || !name) continue;

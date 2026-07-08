@@ -1,30 +1,38 @@
 /**
- * 6. smaregi.gs: スマレジ・プラットフォームAPI連携
+ * 6. smaregi.gs: スマレジ・プラットフォームAPI連携（本番）
  *
- * 目的: その日実際に売れた商品別出数(実績)を毎日取得し「実績出数ログ」へ書込み、
- * 「予算・実績」の「実績」列（合計金額）も自動更新する。
+ * 目的: その日実際に売れた商品別出数(実績)を店舗ごとに毎日取得し「実績出数ログ」へ書込み、
+ * 「予算・実績」の「実績」列（現在選択中の店舗の合計金額）も自動更新する。
+ * 対象店舗は「予算・実績」シート C1(見出し)/D1(プルダウン)で選択する
+ * （メニュー「スマレジ店舗一覧を更新」で店舗一覧をD1に反映してから選ぶ）。
  * 商品名のクレンジング・集計は sheetActions.gs の aggregateCleanedSalesRows_ をそのまま流用する。
  *
  * 事前準備（このファイルのコードだけでは完結しない）:
  * 1. Apps Script エディタ → プロジェクトの設定 → スクリプトプロパティに
- *    POS_CLIENT_ID_TEST / POS_CLIENT_SECRET_TEST を設定（値はコードに書かない）
- * 2. メニュー「発注管理」→「スマレジ日次自動取得トリガーを設定」を一度だけ実行
+ *    POS_CLIENT_ID / POS_CLIENT_SECRET を設定（値はコードに書かない）
+ * 2. スマレジ・デベロッパーズのアプリ設定で pos.transactions:read / pos.stores:read スコープを有効化
+ * 3. メニュー「発注管理」→「スマレジ店舗一覧を更新」を実行し、予算・実績 D1 で対象店舗を選択
+ * 4. メニュー「発注管理」→「スマレジ日次自動取得トリガーを設定」を一度だけ実行
  *
  * 既知の未対応事項: 返品取引(returnSales=1)は現状 fetchSmaregiTransactionDetails_ の
  * 集計対象から特に区別していない（通常取引の details をそのまま合算）。返品が多い店舗では
  * 実データで実績と突き合わせて要検証。
  */
 
-const ACTUAL_SALES_LOG_HEADERS_ = ["日付", "統一商品名", "販売点数", POS_SALES_HEADER_EX_TAX];
+const ACTUAL_SALES_LOG_HEADERS_ = ["日付", "店舗", "統一商品名", "販売点数", POS_SALES_HEADER_EX_TAX];
+
+/** 対象店舗を選択する予算・実績シートのセル */
+const SMAREGI_STORE_LABEL_CELL_ = "C1";
+const SMAREGI_STORE_DROPDOWN_CELL_ = "D1";
 
 /** スクリプトプロパティからクライアント資格情報を読む（未設定ならエラー） */
 const getSmaregiCredentials_ = () => {
   let props = PropertiesService.getScriptProperties();
-  let clientId = props.getProperty("POS_CLIENT_ID_TEST");
-  let clientSecret = props.getProperty("POS_CLIENT_SECRET_TEST");
+  let clientId = props.getProperty("POS_CLIENT_ID");
+  let clientSecret = props.getProperty("POS_CLIENT_SECRET");
   if (!clientId || !clientSecret) {
     throw new Error(
-      "スクリプトプロパティに POS_CLIENT_ID_TEST / POS_CLIENT_SECRET_TEST が設定されていません。"
+      "スクリプトプロパティに POS_CLIENT_ID / POS_CLIENT_SECRET が設定されていません。"
       + "プロジェクトの設定 → スクリプトプロパティ から登録してください。"
     );
   }
@@ -71,11 +79,97 @@ const extractSmaregiListFromResponse_ = (json) => {
   return [];
 };
 
+/** 店舗一覧を取得（GET /stores、ページング対応） */
+const getSmaregiStores_ = () => {
+  let token = getSmaregiAccessToken_("pos.stores:read");
+  let baseUrl = `${SMAREGI_CONFIG.apiBase}/${SMAREGI_CONFIG.contractId}/pos/stores`;
+  let stores = [];
+  let limit = 100;
+
+  for (let page = 1; page <= 10; page++) {
+    let res = UrlFetchApp.fetch(`${baseUrl}?limit=${limit}&page=${page}`, {
+      method: "get",
+      headers: { Authorization: `Bearer ${token}` },
+      muteHttpExceptions: true
+    });
+    let code = res.getResponseCode();
+    if (code !== 200) {
+      throw new Error(`スマレジ店舗一覧取得API失敗 status=${code} body=${res.getContentText().slice(0, 500)}`);
+    }
+    let pageStores = extractSmaregiListFromResponse_(JSON.parse(res.getContentText() || "[]"));
+    if (pageStores.length === 0) break;
+    stores = stores.concat(pageStores);
+    if (pageStores.length < limit) break;
+  }
+  return stores;
+};
+
+/** 予算・実績 D1 の表示値（例: "1: 渋谷店"）を storeId/storeName に分解 */
+const parseSmaregiStoreCellValue_ = (cellValue) => {
+  let s = String(cellValue == null ? "" : cellValue).trim();
+  let m = s.match(/^([0-9]+)\s*[:：]/);
+  if (!m) return null;
+  return { storeId: m[1], storeName: s.slice(m[0].length).trim() };
+};
+
+/** 予算・実績 D1 から選択中の店舗を解決（未選択ならエラー） */
+const resolveSelectedSmaregiStore_ = (budgetSheet) => {
+  if (!budgetSheet) {
+    throw new Error(`「${SHEET_NAMES.BUDGET_ACTUAL}」シートが見つかりません。`);
+  }
+  let raw = budgetSheet.getRange(SMAREGI_STORE_DROPDOWN_CELL_).getValue();
+  let parsed = parseSmaregiStoreCellValue_(raw);
+  if (!parsed) {
+    throw new Error(
+      `「${SHEET_NAMES.BUDGET_ACTUAL}」の${SMAREGI_STORE_DROPDOWN_CELL_}で対象店舗が選択されていません。`
+      + "先にメニュー「スマレジ店舗一覧を更新」を実行してから選択してください。"
+    );
+  }
+  return parsed;
+};
+
 /**
- * 指定日(JST 00:00〜23:59:59)の取引明細を取得
+ * スマレジの店舗一覧を取得し、予算・実績 C1(見出し)/D1(プルダウン) を整備する（メニューから手動実行）
+ * D1 の選択肢は "storeId: storeName" 形式。既存の選択値が一覧に残っていればそのまま維持する。
+ */
+const setupSmaregiStoreDropdown_ = () => {
+  let stores = getSmaregiStores_();
+  if (stores.length === 0) {
+    notifyUser("スマレジに店舗が1件も見つかりませんでした。");
+    return;
+  }
+
+  let ss = SpreadsheetApp.getActiveSpreadsheet();
+  let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  if (!budgetSheet) {
+    throw new Error(`「${SHEET_NAMES.BUDGET_ACTUAL}」シートが見つかりません。`);
+  }
+
+  let options = stores.map((s) => { return `${s.storeId}: ${s.storeName}`; });
+  let labelCell = budgetSheet.getRange(SMAREGI_STORE_LABEL_CELL_);
+  let dropdownCell = budgetSheet.getRange(SMAREGI_STORE_DROPDOWN_CELL_);
+
+  labelCell.setValue("対象店舗");
+
+  let rule = SpreadsheetApp.newDataValidation()
+    .requireValueInList(options, true)
+    .setAllowInvalid(false)
+    .build();
+  dropdownCell.setDataValidation(rule);
+
+  let current = String(dropdownCell.getValue() || "").trim();
+  if (options.indexOf(current) === -1) {
+    dropdownCell.setValue(options[0]);
+  }
+
+  notifyUser(`スマレジ店舗一覧を更新しました（${stores.length}件）。「${SHEET_NAMES.BUDGET_ACTUAL}」${SMAREGI_STORE_DROPDOWN_CELL_}で対象店舗を選択してください。`);
+};
+
+/**
+ * 指定日(JST 00:00〜23:59:59)・指定店舗の取引明細を取得
  * 通常取引(transactionHeadDivision=1)かつ取消でない(cancelDivision=0)ものだけを対象にする
  */
-const fetchSmaregiTransactionDetails_ = (dateStr) => {
+const fetchSmaregiTransactionDetails_ = (dateStr, storeId) => {
   let token = getSmaregiAccessToken_("pos.transactions:read");
   let fromIso = `${dateStr}T00:00:00+09:00`;
   let toIso = `${dateStr}T23:59:59+09:00`;
@@ -89,6 +183,7 @@ const fetchSmaregiTransactionDetails_ = (dateStr) => {
     let url = baseUrl
       + `?transaction_date_time-from=${encodeURIComponent(fromIso)}`
       + `&transaction_date_time-to=${encodeURIComponent(toIso)}`
+      + (storeId ? `&store_id=${encodeURIComponent(storeId)}` : "")
       + `&with_details=all&limit=${limit}&page=${page}`;
 
     let res = UrlFetchApp.fetch(url, {
@@ -131,17 +226,19 @@ const ensureActualSalesLogSheet_ = (ss) => {
   return sheet;
 };
 
-/** 指定日付の既存行を削除し、集計済み行に置き換える（同日の再取得は上書き） */
-const writeActualSalesLogForDate_ = (sheet, dateStr, aggregatedRows) => {
+/** 指定日付+店舗の既存行を削除し、集計済み行に置き換える（同日同店舗の再取得は上書き。他店舗は保持） */
+const writeActualSalesLogForDate_ = (sheet, dateStr, storeId, aggregatedRows) => {
   let lastRow = sheet.getLastRow();
   let keptRows = [];
   if (lastRow >= 2) {
     let existing = sheet.getRange(2, 1, lastRow - 1, ACTUAL_SALES_LOG_HEADERS_.length).getValues();
-    keptRows = existing.filter((row) => { return formatSheetDateToKey(row[0]) !== dateStr; });
+    keptRows = existing.filter((row) => {
+      return !(formatSheetDateToKey(row[0]) === dateStr && String(row[1]) === String(storeId));
+    });
   }
 
   let newRows = (aggregatedRows || []).map((r) => {
-    return [dateStr, r.menuName, r.salesQty, r.salesAmount];
+    return [dateStr, storeId, r.menuName, r.salesQty, r.salesAmount];
   });
   let allRows = keptRows.concat(newRows);
 
@@ -155,10 +252,11 @@ const writeActualSalesLogForDate_ = (sheet, dateStr, aggregatedRows) => {
 };
 
 /**
- * 指定日のスマレジ実績を取得し「実績出数ログ」へ書込み、「予算・実績」の実績列も更新する
+ * 指定日・指定店舗のスマレジ実績を取得し「実績出数ログ」へ書込み、「予算・実績」の実績列も更新する
+ * （実績列は店舗区分を持たないため、現在選択中の店舗の合計金額でそのまま上書きする）
  */
-const importSmaregiDailyActuals_ = (dateStr) => {
-  let details = fetchSmaregiTransactionDetails_(dateStr);
+const importSmaregiDailyActuals_ = (dateStr, store) => {
+  let details = fetchSmaregiTransactionDetails_(dateStr, store.storeId);
   let rows = details.map((d) => {
     return { rawName: d.productName, qty: d.quantity, salesIncTax: d.unitDiscountedSum };
   });
@@ -166,32 +264,38 @@ const importSmaregiDailyActuals_ = (dateStr) => {
 
   let ss = SpreadsheetApp.getActiveSpreadsheet();
   let logSheet = ensureActualSalesLogSheet_(ss);
-  writeActualSalesLogForDate_(logSheet, dateStr, aggregated);
+  writeActualSalesLogForDate_(logSheet, dateStr, store.storeId, aggregated);
 
   let totalAmount = aggregated.reduce((sum, r) => { return sum + (Number(r.salesAmount) || 0); }, 0);
   let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
   let budgetWritten = budgetSheet ? writeBudgetRatioAtDate_(budgetSheet, dateStr, "実績", totalAmount) : false;
 
   notifyUser(
-    `スマレジ実績取込完了 [${dateStr}]: ${aggregated.length}商品 / 合計${Math.round(totalAmount).toLocaleString()}円`
+    `スマレジ実績取込完了 [${dateStr} / ${store.storeName || store.storeId}]: ${aggregated.length}商品 / 合計${Math.round(totalAmount).toLocaleString()}円`
     + (budgetWritten ? "（予算・実績「実績」列を更新）" : "（予算・実績: 対象日の行が見つからず書込みスキップ）")
   );
 
-  return { dateStr: dateStr, productCount: aggregated.length, totalAmount: totalAmount };
+  return { dateStr: dateStr, storeId: store.storeId, productCount: aggregated.length, totalAmount: totalAmount };
 };
 
 /** 当日分を取得（毎晩22:45ごろの時間トリガーから呼ぶ想定。営業終了間際までの実績を取り込む） */
 const runSmaregiDailyAutoImport = () => {
-  importSmaregiDailyActuals_(formatJstDate_(new Date()));
+  let budgetSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  let store = resolveSelectedSmaregiStore_(budgetSheet);
+  importSmaregiDailyActuals_(formatJstDate_(new Date()), store);
 };
 
-/** 日付を指定して手動再取得（空欄なら本日） */
+/** 日付を指定して手動再取得（空欄なら本日、対象店舗は予算・実績 D1 の選択に従う） */
 const promptAndImportSmaregiActuals_ = () => {
+  let ss = SpreadsheetApp.getActiveSpreadsheet();
+  let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  let store = resolveSelectedSmaregiStore_(budgetSheet);
+
   let ui = SpreadsheetApp.getUi();
   let today = formatJstDate_(new Date());
   let res = ui.prompt(
     "スマレジ実績取得",
-    `対象日を yyyy-MM-dd で入力してください（空欄なら本日 ${today}）`,
+    `対象店舗: ${store.storeName || store.storeId}\n対象日を yyyy-MM-dd で入力してください（空欄なら本日 ${today}）`,
     ui.ButtonSet.OK_CANCEL
   );
   if (res.getSelectedButton() !== ui.Button.OK) return;
@@ -202,7 +306,7 @@ const promptAndImportSmaregiActuals_ = () => {
     ui.alert(`日付の形式が正しくありません: ${input}`);
     return;
   }
-  importSmaregiDailyActuals_(dateStr);
+  importSmaregiDailyActuals_(dateStr, store);
 };
 
 const SMAREGI_DAILY_TRIGGER_HANDLER_ = "runSmaregiDailyAutoImport";
