@@ -57,6 +57,8 @@ const buildSimulationContext = (simStartDate, simDays, periodMode, orderDate, op
     posTotalSalesQty += Number(r.salesQty) || 0;
   });
 
+  let actualSalesLogData = loadActualSalesLogData(ss.getSheetByName(SHEET_NAMES.ACTUAL_SALES_LOG));
+
   let backlogSheet = ss.getSheetByName(SHEET_NAMES.BACKLOG);
   let backlogMeta = backlogSheet ? findSheetHeaderMeta(backlogSheet, ["日付", "商材名", "分類"]) : null;
 
@@ -88,6 +90,7 @@ const buildSimulationContext = (simStartDate, simDays, periodMode, orderDate, op
     posCleanData: posCleanData,
     posTotalRevenue: posTotalRevenue,
     posTotalSalesQty: posTotalSalesQty,
+    actualSalesLogData: actualSalesLogData,
     backlogMeta: backlogMeta,
     averageSpend: averageSpend,
     nameUnifyMap: nameUnifyMap,
@@ -388,6 +391,38 @@ const loadPosCleanData = (sheet) => {
   for (let i = 0; i < rows.length; i++) {
     let row = parsePosCleanRow_(rows[i], idxName, idxQty, salesMeta.idx, salesMeta.exTax);
     if (row) data.push(row);
+  }
+  return data;
+};
+
+/**
+ * 実績出数ログ（日付|統一商品名|販売点数|純売上(税抜)）を日付ごとにグルーピング
+ * @return {{[dateStr:string]: {menuName:string, salesQty:number, salesAmount:number}[]}}
+ */
+const loadActualSalesLogData = (sheet) => {
+  let data = {};
+  if (!sheet) return data;
+
+  let meta = findHeaderRowAndIndices(sheet, ["日付", "統一商品名", "販売点数", POS_SALES_HEADER_EX_TAX]);
+  if (!meta) return data;
+
+  let idxDate = meta.headers.indexOf("日付");
+  let idxName = meta.headers.indexOf("統一商品名");
+  let idxQty = meta.headers.indexOf("販売点数");
+  let idxSales = meta.headers.indexOf(POS_SALES_HEADER_EX_TAX);
+
+  for (let i = meta.dataStartRow; i < meta.fullData.length; i++) {
+    let row = meta.fullData[i];
+    let dateKey = formatSheetDateToKey(row[idxDate]);
+    let name = String(row[idxName] || "").trim();
+    if (!dateKey || !name) continue;
+
+    if (!data[dateKey]) data[dateKey] = [];
+    data[dateKey].push({
+      menuName: name,
+      salesQty: Number(row[idxQty]) || 0,
+      salesAmount: Number(row[idxSales]) || 0
+    });
   }
   return data;
 };

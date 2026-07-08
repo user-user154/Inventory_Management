@@ -17,8 +17,17 @@ const SHEET_NAMES = {
   BACKLOG: "バックログ",
   FORECAST_DEMAND_LOG: "予測出数ログ",
   NAME_UNIFY_MASTER: "名寄せマスタ",
-  YIELD_MASTER: "歩留まりマスタ"
+  YIELD_MASTER: "歩留まりマスタ",
+  ACTUAL_SALES_LOG: "実績出数ログ"
 };
 
 const SALES_TAX_RATE = 0.10;
 const POS_SALES_HEADER_EX_TAX = "純売上(税抜)";
+
+/** スマレジ・プラットフォームAPI 接続先（契約IDはシークレットではないためここに置く。
+ *  クライアントID/シークレットはスクリプトプロパティ SMAREGI_CLIENT_ID / SMAREGI_CLIENT_SECRET） */
+const SMAREGI_CONFIG = {
+  contractId: "sb_skt584z8",
+  idBase: "https://id.smaregi.dev",
+  apiBase: "https://api.smaregi.dev"
+};
