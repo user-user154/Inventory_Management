@@ -12,6 +12,7 @@ function onOpen() {
     .createMenu("発注管理")
     .addItem("予算・実績の曜日を更新", "syncBudgetWeekdaysFromD2")
     .addSeparator()
+    .addItem("スマレジ店舗一覧を更新（予算・実績 D1）", "setupSmaregiStoreDropdown_")
     .addItem("スマレジ実績を取得（当日分）", "runSmaregiDailyAutoImport")
     .addItem("スマレジ実績を取得（日付指定）", "promptAndImportSmaregiActuals_")
     .addItem("スマレジ日次自動取得トリガーを設定", "setupSmaregiDailyTrigger")
@@ -65,7 +66,7 @@ const runSimulationPipeline = () => {
 
   let orderDate = new Date(rawDate); // 指示書 B2（計算したい基準日）
   let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
-  let period = readSimulationPeriod(budgetSheet);
+  let period = "当日"; // 予算・実績 D1 は店舗選択に転用したため、期間は常に当日固定
   let stockSheet = ss.getSheetByName(SHEET_NAMES.STOCK_TAKING);
   let inventoryVal = stockSheet ? stockSheet.getRange("B1").getValue() : null;
   let inventoryDate = (inventoryVal && !isNaN(new Date(inventoryVal).getTime())) ? new Date(inventoryVal) : null;

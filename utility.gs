@@ -1819,17 +1819,6 @@ const stockSnapshotToRawMinQtyMap_ = (stockData, ctx) => {
 };
 
 /**
- * 予算・実績シート D1 の期間プルダウンを読み取る（当日 / 週間 / 月間）
- */
-const readSimulationPeriod = (budgetSheet) => {
-  if (!budgetSheet) return "当日";
-  let val = String(budgetSheet.getRange("D1").getValue()).trim();
-  if (val.indexOf("週") !== -1 || val.indexOf("周") !== -1) return "週間";
-  if (val.indexOf("月") !== -1) return "月間";
-  return "当日";
-};
-
-/**
  * シミュレーション開始日（バックログ等の1日目）
  * - 月間: B2 の月の1日から
  * - 当日・週間: B2 から
