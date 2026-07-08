@@ -3,24 +3,32 @@
  * 定数は constants.gs のみ（main に SHEET_NAMES 等を書かないこと）
  */
 
-/** スプレッドシートを開いたときにカスタムメニューを表示（PC用。スマホは指示書 B1/E1/I1） */
+/** スプレッドシートを開いたときにカスタムメニューを表示（PC用。スマホは指示書 A1/B1） */
 function onOpen() {
   let ss = SpreadsheetApp.getActiveSpreadsheet();
   clearStaleCheckboxSkipProps_();
   ensureOnEditInstallableTrigger_(ss);
 
   let orderSheet = ss.getSheetByName(SHEET_NAMES.ORDER_FORM);
-  if (orderSheet) setupOrderSheetManualInputArea(orderSheet);
+  if (orderSheet) {
+    setupOrderSheetActionControls_(orderSheet);
+    setupOrderSheetManualInputArea(orderSheet);
+    resetStuckOrderSheetCheckboxIfNeeded_(orderSheet);
+    clearLegacySheetTriggerCheckboxes_(orderSheet);
+  }
 
   let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
   if (budgetSheet) {
-    setupBudgetActualWeeklyCostCheckbox(budgetSheet);
-    resetStuckBudgetCheckboxIfNeeded_(budgetSheet);
+    clearLegacySheetTriggerCheckboxes_(budgetSheet);
   }
 
   SpreadsheetApp.getUi()
     .createMenu("発注管理")
     .addItem("予算・実績の曜日を更新", "syncBudgetWeekdaysFromD2")
+    .addSeparator()
+    .addItem("スマレジ実績を取得（当日分）", "runSmaregiDailyAutoImport")
+    .addItem("スマレジ実績を取得（日付指定）", "promptAndImportSmaregiActuals_")
+    .addItem("スマレジ日次自動取得トリガーを設定", "setupSmaregiDailyTrigger")
     .addSeparator()
     .addItem("バックログ系データを一括削除（デバッグ用）", "resetBacklogRelatedHistory")
     .addToUi();
@@ -52,10 +60,18 @@ const runSimulationPipeline = () => {
   let inventoryVal = stockSheet ? stockSheet.getRange("B1").getValue() : null;
   let inventoryDate = (inventoryVal && !isNaN(new Date(inventoryVal).getTime())) ? new Date(inventoryVal) : null;
 
-  // 在庫基準点は棚卸し表B1。B1以降は理論在庫で計算する。
+  // 在庫基準点は棚卸し表B1。数量は棚卸し表を優先し、B1が前日以前なら指示書日から理論在庫を進める。
+  let orderDateStr = formatJstDate_(orderDate);
+  let inventoryDateStr = inventoryDate ? formatJstDate_(inventoryDate) : null;
   let simStartDate = inventoryDate || getSimulationStartDate(orderDate, period);
   if (inventoryDate && inventoryDate.getTime() > orderDate.getTime()) {
     throw new Error(`棚卸し表B1（${formatJstDate_(inventoryDate)}）より前の日付を指示書B2（${formatJstDate_(orderDate)}）で計算しようとしています。B2 を棚卸し日以降にしてください。`);
+  }
+  if (inventoryDateStr && inventoryDateStr === addDaysToDateStr_(orderDateStr, -1)) {
+    if (period === "当日") {
+      simStartDate = new Date(orderDate.getTime());
+    }
+    Logger.log(`[run] 棚卸し前日基準: 在庫=${inventoryDateStr} 計算開始=${formatJstDate_(simStartDate)}（棚卸し優先・納品加算なし）`);
   }
 
   let vendorSheet = ss.getSheetByName(SHEET_NAMES.VENDOR_MASTER);
