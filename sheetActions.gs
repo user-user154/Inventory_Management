@@ -379,6 +379,38 @@ const cleanProductName = (name) => {
   return s.trim();
 };
 
+/**
+ * 生の商品行（税込金額）をクレンジング→税抜換算→統一商品名で合算
+ * @param {{rawName:string, qty:number, salesIncTax:number}[]} rows
+ */
+const aggregateCleanedSalesRows_ = (rows) => {
+  let map = {};
+  (rows || []).forEach((row) => {
+    let rawName = String(row.rawName == null ? "" : row.rawName).trim();
+    if (!rawName) return;
+
+    let unifiedName = cleanProductName(rawName);
+    if (/オプション|ホッピー|^白$|^黒$/.test(rawName)) {
+      Logger.log(`[POS整形] ${rawName} → ${unifiedName || "(除外)"}`);
+    }
+    if (!unifiedName) return;
+
+    let amount = convertPosSalesToExTax(Number(row.salesIncTax) || 0);
+    if (amount <= 0 && !isZeroSalesExempt_(rawName, unifiedName)) return;
+
+    let qty = Number(row.qty) || 0;
+    if (!map[unifiedName]) {
+      map[unifiedName] = { menuName: unifiedName, salesQty: 0, salesAmount: 0 };
+    }
+    map[unifiedName].salesQty += qty;
+    map[unifiedName].salesAmount += amount;
+  });
+
+  let out = Object.keys(map).map((k) => { return map[k]; });
+  out.sort((a, b) => { return b.salesAmount - a.salesAmount; });
+  return out;
+};
+
 /** 生POSを読み、クレンジング後に統一商品名で合算 */
 const aggregatePosRawSheet = (rawSheet) => {
   let meta = findPosRawHeaderMeta(rawSheet);
@@ -389,32 +421,12 @@ const aggregatePosRawSheet = (rawSheet) => {
     throw new Error(`「${SHEET_NAMES.POS_RAW}」に「純売上」列が見つかりません。`);
   }
 
-  let map = {};
+  let rows = [];
   for (let i = meta.dataStartRow; i < meta.fullData.length; i++) {
     let row = meta.fullData[i];
-    let rawName = String(row[meta.idxName]).trim();
-    if (!rawName) continue;
-
-    let unifiedName = cleanProductName(rawName);
-    if (/オプション|ホッピー|^白$|^黒$/.test(rawName)) {
-      Logger.log(`[POS整形] ${rawName} → ${unifiedName || "(除外)"}`);
-    }
-    if (!unifiedName) continue;
-
-    let amount = convertPosSalesToExTax(Number(row[meta.idxSales]) || 0);
-    if (amount <= 0 && !isZeroSalesExempt_(rawName, unifiedName)) continue;
-
-    let qty = Number(row[meta.idxQty]) || 0;
-    if (!map[unifiedName]) {
-      map[unifiedName] = { menuName: unifiedName, salesQty: 0, salesAmount: 0 };
-    }
-    map[unifiedName].salesQty += qty;
-    map[unifiedName].salesAmount += amount;
+    rows.push({ rawName: row[meta.idxName], qty: row[meta.idxQty], salesIncTax: row[meta.idxSales] });
   }
-
-  let rows = Object.keys(map).map((k) => { return map[k]; });
-  rows.sort((a, b) => { return b.salesAmount - a.salesAmount; });
-  return rows;
+  return aggregateCleanedSalesRows_(rows);
 };
 
 const findPosRawHeaderMeta = (sheet) => {
@@ -643,14 +655,44 @@ const collectManualAdjustmentEntries = (orderSheet, aiSnapshot, rawMaster) => {
 
 /** 同一日付の行を差し替えてログを更新 */
 const writeManualAdjustmentLogForDate = (logSheet, dateStr, entries) => {
-  let meta = findHeaderRowAndIndices(logSheet, ["日付", "商材名", "分類"]);
+  // 日付見出しだけ必須とし、不足列（商材名/分類）は自動追加して継続する。
+  let meta = findHeaderRowAndIndices(logSheet, ["日付"]);
   if (!meta) {
-    throw new Error(`「${SHEET_NAMES.MANUAL_ADJUSTMENT_LOG}」に 日付・商材名・分類 の見出しがありません。`);
+    // 初回運用などで空シートの場合は見出しを自動作成する。
+    let defaultHeaders = ["日付", "商材名", "分類", "確定量", "単位", "AI予測量", "変更量", "調整理由"];
+    logSheet.getRange(1, 1, 1, defaultHeaders.length).setValues([defaultHeaders]);
+    meta = findHeaderRowAndIndices(logSheet, ["日付"]);
+    if (!meta) {
+      throw new Error(`「${SHEET_NAMES.MANUAL_ADJUSTMENT_LOG}」の見出し作成に失敗しました。`);
+    }
   }
 
-  let idxDate = meta.headers.indexOf("日付");
-  let idxName = meta.headers.indexOf("商材名");
-  let idxType = meta.headers.indexOf("分類");
+  let headerRow = meta.headerRowIdx + 1;
+  let headers = meta.headers.slice();
+  let idxDate = findColumnIndex_(headers, ["日付"], -1);
+  let idxName = findColumnIndex_(headers, ["商材名", "商品名", "原材料名", "品名"], -1);
+  let idxType = findColumnIndex_(headers, ["分類", "区分", "種別"], -1);
+
+  if (idxName === -1) {
+    headers.push("商材名");
+    logSheet.getRange(headerRow, headers.length).setValue("商材名");
+    idxName = headers.length - 1;
+  }
+  if (idxType === -1) {
+    headers.push("分類");
+    logSheet.getRange(headerRow, headers.length).setValue("分類");
+    idxType = headers.length - 1;
+  }
+
+  // ヘッダー更新後のメタを再取得
+  meta = findHeaderRowAndIndices(logSheet, ["日付"]);
+  headers = meta.headers;
+  idxDate = findColumnIndex_(headers, ["日付"], -1);
+  idxName = findColumnIndex_(headers, ["商材名", "商品名", "原材料名", "品名"], -1);
+  idxType = findColumnIndex_(headers, ["分類", "区分", "種別"], -1);
+  if (idxDate === -1 || idxName === -1 || idxType === -1) {
+    throw new Error(`「${SHEET_NAMES.MANUAL_ADJUSTMENT_LOG}」の見出し解決に失敗しました。検出見出し: ${headers.join(" | ")}`);
+  }
   let idxQty = meta.headers.indexOf("確定量");
   let idxUnit = meta.headers.indexOf("単位");
   let idxAiQty = findColumnIndex_(meta.headers, ["AI予測量", "AI予測数量", "自動指示量"]);

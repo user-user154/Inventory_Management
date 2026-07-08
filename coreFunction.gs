@@ -670,6 +670,19 @@ const computeUnitMenuDemands_ = (ctx) => {
   return { prepDemand: prepDemand, directRawDemand: directRawDemand };
 };
 
+/** 実績出数（当日実際の商品別販売点数）をレシピ展開。比率換算せず実数量をそのまま使う */
+const expandActualDayDemands_ = (ctx, actualRows) => {
+  let prepDemand = {};
+  let directRawDemand = {};
+  (actualRows || []).forEach((row) => {
+    let qty = Number(row.salesQty) || 0;
+    if (qty > 0) {
+      expandMenuToDemands(row.menuName, qty, ctx, prepDemand, directRawDemand);
+    }
+  });
+  return { prepDemand: prepDemand, directRawDemand: directRawDemand };
+};
+
 const finalizeDailyDemandsFromScaled_ = (ctx, prepDemand, directRawDemand) => {
   let inProcess = finalizePrepInstructions(prepDemand, ctx);
   collectNestedPrepInstructions(inProcess, ctx);
@@ -786,9 +799,25 @@ const precomputeDailyDemands = (ctx, unitMenuDemands, unitCostRawDemand, unitPre
     let dateStr = ctx.targetDatesStr[d];
     let salesBase = resolveDailySalesBase_(ctx.budgetActualData[dateStr]);
     let factor = salesBase.amount || 0;
-    let prepFactor = resolvePrepDemandSalesFactor_(ctx, d, dateStr);
-    let prepDemand = scaleDemandMap_(unit.prepDemand, prepFactor);
-    let directRawDemand = scaleDemandMap_(unit.directRawDemand, factor);
+    let lookaheadAmount = resolveNextDayPrepLookaheadAmount_(ctx, d);
+    let actualRows = ctx.actualSalesLogData && ctx.actualSalesLogData[dateStr];
+    let usedActual = actualRows && actualRows.length > 0;
+
+    let prepDemand, directRawDemand, menuRawDemand;
+    if (usedActual) {
+      // 実績出数がある日（今日を含む過去日）は比率予測ではなく実際の商品別出数をそのまま展開する
+      let actualExpanded = expandActualDayDemands_(ctx, actualRows);
+      let lookaheadPrepDemand = scaleDemandMap_(unit.prepDemand, lookaheadAmount);
+      prepDemand = mergeRawDemandMaps_(actualExpanded.prepDemand, lookaheadPrepDemand);
+      directRawDemand = actualExpanded.directRawDemand;
+      menuRawDemand = finalizeCostRawDemandFromScaled_(
+        ctx, actualExpanded.prepDemand, actualExpanded.directRawDemand, { skipYield: true }
+      );
+    } else {
+      prepDemand = scaleDemandMap_(unit.prepDemand, factor + lookaheadAmount);
+      directRawDemand = scaleDemandMap_(unit.directRawDemand, factor);
+      menuRawDemand = factor > 0 ? scaleDemandMap_(unitCostRaw, factor) : {};
+    }
 
     let wastePrepQty = purgeExpiredPrepLots_(prepLots, dateStr, ctx);
     reducePrepLotDemandByLots_(prepDemand, prepLots, ctx);
@@ -802,7 +831,6 @@ const precomputeDailyDemands = (ctx, unitMenuDemands, unitCostRawDemand, unitPre
     let finalized = finalizeDailyDemandsFromScaled_(ctx, prepDemand, directRawDemand);
     applyPrepLotsAfterFinalize_(prepLots, finalized.inProcess, prepLotRemainder, dateStr, ctx);
 
-    let menuRawDemand = factor > 0 ? scaleDemandMap_(unitCostRaw, factor) : {};
     let prepYieldLossRawDemand = calcPrepInstructionYieldLossRaw_(ctx, finalized.inProcess, yieldLossUnit);
     let wasteRawDemand = calcPrepFinishedWasteToRaw_(ctx, wastePrepQty, wasteUnit);
     let rawOutputDemand = mergeRawDemandMaps_(menuRawDemand, prepYieldLossRawDemand, wasteRawDemand);
@@ -811,13 +839,15 @@ const precomputeDailyDemands = (ctx, unitMenuDemands, unitCostRawDemand, unitPre
       factor
     );
 
+    let baseFlag = usedActual ? "実績出数ベース" : salesBase.baseFlag;
+
     trackDebugShiodareDailyDemand_(ctx, {
       date: dateStr,
       dayIdx: d,
       salesAmount: factor,
       salesFactor: factor,
-      prepFactor: prepFactor,
-      baseFlag: salesBase.baseFlag,
+      prepFactor: factor + lookaheadAmount,
+      baseFlag: baseFlag,
       prepDemand: prepDemand,
       inProcess: finalized.inProcess,
       directRawConsumption: finalized.directRawConsumption,
@@ -827,7 +857,7 @@ const precomputeDailyDemands = (ctx, unitMenuDemands, unitCostRawDemand, unitPre
 
     byDay.push({
       date: dateStr,
-      baseFlag: salesBase.baseFlag,
+      baseFlag: baseFlag,
       salesAmount: factor,
       menuRawDemand: menuRawDemand,
       prepYieldLossRawDemand: prepYieldLossRawDemand,
@@ -928,10 +958,12 @@ const findNextVendorDeliveryDayIdx = (currentDeliveryDayIdx, lt, ctx, vCal, holi
 };
 
 const findNextVendorDeliveryDayIdxCore_ = (currentDeliveryDayIdx, lt, ctx, vCal, holidayCache) => {
-  for (let orderDay = currentDeliveryDayIdx + 1; orderDay < ctx.simDays; orderDay++) {
-    let nextIdx = getVendorDeliveryDayIndex(orderDay, lt);
-    if (nextIdx <= currentDeliveryDayIdx) continue;
-    if (nextIdx >= ctx.simDays) break;
+  // currentDeliveryDayIdx は「納品日」インデックスなので、
+  // ここでは次の納品候補日を直接走査する（orderDay と混同しない）。
+  for (let nextIdx = currentDeliveryDayIdx + 1; nextIdx < ctx.simDays; nextIdx++) {
+    // この納品日 nextIdx が成立するには、対応する発注日 nextIdx-LT が存在する必要がある。
+    let orderDay = nextIdx - lt;
+    if (orderDay < 0) continue;
     let deliveryDate = new Date(ctx.targetDatesStr[nextIdx] + "T12:00:00");
     if (isVendorDeliveryAllowed(vCal, deliveryDate, holidayCache)) {
       return nextIdx;

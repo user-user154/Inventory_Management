@@ -26,6 +26,10 @@ function onOpen() {
     .createMenu("発注管理")
     .addItem("予算・実績の曜日を更新", "syncBudgetWeekdaysFromD2")
     .addSeparator()
+    .addItem("スマレジ実績を取得（当日分）", "runSmaregiDailyAutoImport")
+    .addItem("スマレジ実績を取得（日付指定）", "promptAndImportSmaregiActuals_")
+    .addItem("スマレジ日次自動取得トリガーを設定", "setupSmaregiDailyTrigger")
+    .addSeparator()
     .addItem("バックログ系データを一括削除（デバッグ用）", "resetBacklogRelatedHistory")
     .addToUi();
 }

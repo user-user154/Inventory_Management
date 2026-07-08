@@ -1209,10 +1209,10 @@ const ensureLot14OrderEntry_ = (todayOrders, rName, rawRow, orderDayIdx, ctx, ho
 
 // ===== DEBUG_SHIODARE_START（デバッグ用・削除可） =====
 const DEBUG_SHIODARE_TRACK_ENABLED_ = true;
-const DEBUG_SHIODARE_RAW_NAME_ = "塩だれ";
-const DEBUG_AWASE_SHIODARE_PREP_NAME_ = "合わせ塩だれ";
+const DEBUG_SHIODARE_RAW_NAME_ = "キャベツ";
+const DEBUG_AWASE_SHIODARE_PREP_NAME_ = "";
 
-/** 発注計算・14kg合算のトラック対象（原材料「塩だれ」のみ） */
+/** 発注計算・14kg合算のトラック対象（原材料「キャベツ」のみ） */
 const isDebugShiodareOrderTarget_ = (rName) => {
   return DEBUG_SHIODARE_TRACK_ENABLED_ && rName === DEBUG_SHIODARE_RAW_NAME_;
 };
@@ -1258,7 +1258,7 @@ const describePrepUsesRawPerLot_ = (prepName, rawName, ctx) => {
 
 const logDebugShiodare_ = (stage, label, fields) => {
   if (!DEBUG_SHIODARE_TRACK_ENABLED_) return;
-  let parts = [`[DEBUG塩だれ] ${stage}`, `対象=${label}`];
+  let parts = [`[DEBUGキャベツ] ${stage}`, `対象=${label}`];
   Object.keys(fields || {}).forEach((k) => {
     parts.push(`${k}=${fields[k]}`);
   });
@@ -1289,21 +1289,23 @@ const trackDebugShiodareDailyDemand_ = (ctx, payload) => {
     仕込み内訳: prepContrib
   });
 
-  let awaseDemand = (payload.prepDemand && payload.prepDemand[prepName]) || 0;
-  let awaseProc = payload.inProcess ? payload.inProcess[prepName] : null;
-  let awaseFields = {
-    日付: payload.date || "",
-    売上: Math.round(payload.salesAmount || 0),
-    仕込み倍率: payload.prepFactor != null ? payload.prepFactor.toFixed(3) : "",
-    需要量: Math.round(awaseDemand)
-  };
-  if (awaseProc) {
-    awaseFields.ロット数 = awaseProc.lotCount;
-    awaseFields.仕込み量 = Math.round(awaseProc.aiQty) + (awaseProc.unit || "");
+  if (prepName) {
+    let awaseDemand = (payload.prepDemand && payload.prepDemand[prepName]) || 0;
+    let awaseProc = payload.inProcess ? payload.inProcess[prepName] : null;
+    let awaseFields = {
+      日付: payload.date || "",
+      売上: Math.round(payload.salesAmount || 0),
+      仕込み倍率: payload.prepFactor != null ? payload.prepFactor.toFixed(3) : "",
+      需要量: Math.round(awaseDemand)
+    };
+    if (awaseProc) {
+      awaseFields.ロット数 = awaseProc.lotCount;
+      awaseFields.仕込み量 = Math.round(awaseProc.aiQty) + (awaseProc.unit || "");
+    }
+    let recipeNote = describePrepUsesRawPerLot_(prepName, rawName, ctx);
+    if (recipeNote) awaseFields.キャベツレシピ = recipeNote;
+    logDebugShiodare_("日次仕込み", prepName, awaseFields);
   }
-  let recipeNote = describePrepUsesRawPerLot_(prepName, rawName, ctx);
-  if (recipeNote) awaseFields.塩だれレシピ = recipeNote;
-  logDebugShiodare_("日次仕込み", prepName, awaseFields);
 };
 
 const trackDebugShiodareCalcStart_ = (rName, rawRow, orderDayIdx, stockAfterConsumption, ctx, orderOptions) => {
@@ -1615,18 +1617,13 @@ const resolveDailySalesBase_ = (ba) => {
 };
 
 /**
- * 仕込み需要の売上倍率: 当日売上基準 + 翌日予算の50%
- * （翌日は予算列のみ。実績は混ぜない）
+ * 仕込み需要の翌日先読み分: 翌日予算の50%（翌日は未来のため常に予算列のみ。実績は混ぜない）
+ * 当日分は呼び出し側が別途持っている（実績出数がある日はそれを使うため、ここでは合算しない）
  */
-const resolvePrepDemandSalesFactor_ = (ctx, dayIdx, dateStr) => {
-  let salesBase = resolveDailySalesBase_(ctx.budgetActualData[dateStr]);
-  let factor = salesBase.amount || 0;
-  if (!ctx.targetDatesStr || dayIdx + 1 >= ctx.targetDatesStr.length) {
-    return factor;
-  }
+const resolveNextDayPrepLookaheadAmount_ = (ctx, dayIdx) => {
+  if (!ctx.targetDatesStr || dayIdx + 1 >= ctx.targetDatesStr.length) return 0;
   let nextBa = ctx.budgetActualData[ctx.targetDatesStr[dayIdx + 1]];
-  let nextBudget = nextBa ? (Number(nextBa.budget) || 0) : 0;
-  return factor + nextBudget * 0.5;
+  return nextBa ? (Number(nextBa.budget) || 0) * 0.5 : 0;
 };
 
 /**
@@ -2787,6 +2784,21 @@ const findHeaderColumnsInColumnRange_ = (sheet, headerName, maxHeaderRow, minCol
   let lastCol = Math.max(sheet.getLastColumn(), maxCol);
   let headerRows = readOrderSheetHeaderRows_(sheet, maxHeaderRow, lastCol);
   return findHeaderColumnsInRowBlock_(headerRows, headerName, maxHeaderRow, minCol, maxCol);
+};
+
+/** 指示書ブロックの名称列を見出しから解決（見つからなければ既定列） */
+const resolveNameColumnForBlock = (sheet, headerRow, defaultCol) => {
+  if (!sheet) return defaultCol;
+  let minCol = defaultCol <= 6 ? 1 : 8;
+  let maxCol = defaultCol <= 6 ? 6 : 13;
+  let rowVals = sheet.getRange(headerRow, minCol, 1, maxCol - minCol + 1).getValues()[0];
+  let candidates = ["商材名", "原材料名", "品名", "仕込み名", "メニュー名"];
+
+  for (let i = 0; i < rowVals.length; i++) {
+    let label = String(rowVals[i] == null ? "" : rowVals[i]).trim();
+    if (candidates.indexOf(label) !== -1) return minCol + i;
+  }
+  return defaultCol;
 };
 
 const parseSheetNumericValue_ = (val) => {
