@@ -2357,6 +2357,24 @@ const ensureOnEditInstallableTrigger_ = (ss) => {
 };
 
 /**
+ * インストール型 onEdit トリガーを手動セットアップ（メニューから実行する用）
+ * onOpen（シンプルトリガー）内からは ScriptApp.getProjectTriggers を呼べないため、
+ * ここに切り出して権限のあるコンテキスト（メニュークリック）から実行できるようにする。
+ */
+const setupOnEditInstallableTrigger = () => {
+  let ss = SpreadsheetApp.getActiveSpreadsheet();
+  let already = ScriptApp.getProjectTriggers().some((t) => {
+    return t.getHandlerFunction() === "onEditInstallable" && t.getEventType() === ScriptApp.EventType.ON_EDIT;
+  });
+  if (already) {
+    notifyUser("インストール型 onEdit トリガーは既に設定済みです。");
+    return;
+  }
+  ensureOnEditInstallableTrigger_(ss);
+  notifyUser("インストール型 onEdit トリガーを設定しました（長時間実行・oldValue対応）。");
+};
+
+/**
  * スクリプトによるチェック解除 onEdit はスキップ。
  * ユーザーがトリガーセルをオンにしたとき、古いスキップフラグは除去して処理を続行。
  */

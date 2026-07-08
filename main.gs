@@ -3,11 +3,32 @@
  * 定数は constants.gs のみ（main に SHEET_NAMES 等を書かないこと）
  */
 
-/** スプレッドシートを開いたときにカスタムメニューを表示（PC用。スマホは指示書 A1/B1） */
+/**
+ * スプレッドシートを開いたときにカスタムメニューを表示（PC用。スマホは指示書 A1/B1）
+ * メニュー作成を最優先で行い、後続処理（権限が必要なトリガー確認など）が失敗してもメニューは必ず出るようにする。
+ */
 function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu("発注管理")
+    .addItem("予算・実績の曜日を更新", "syncBudgetWeekdaysFromD2")
+    .addSeparator()
+    .addItem("スマレジ実績を取得（当日分）", "runSmaregiDailyAutoImport")
+    .addItem("スマレジ実績を取得（日付指定）", "promptAndImportSmaregiActuals_")
+    .addItem("スマレジ日次自動取得トリガーを設定", "setupSmaregiDailyTrigger")
+    .addItem("onEdit連携トリガーを設定（長時間実行用・任意）", "setupOnEditInstallableTrigger")
+    .addSeparator()
+    .addItem("バックログ系データを一括削除（デバッグ用）", "resetBacklogRelatedHistory")
+    .addToUi();
+
   let ss = SpreadsheetApp.getActiveSpreadsheet();
   clearStaleCheckboxSkipProps_();
-  ensureOnEditInstallableTrigger_(ss);
+  // シンプルトリガーの onOpen からは ScriptApp.getProjectTriggers が権限エラーになるため、
+  // ここで失敗してもメニュー表示やシート初期化を止めない。
+  try {
+    ensureOnEditInstallableTrigger_(ss);
+  } catch (err) {
+    Logger.log(`[onOpen] インストール型 onEdit の確認をスキップ: ${err.message}`);
+  }
 
   let orderSheet = ss.getSheetByName(SHEET_NAMES.ORDER_FORM);
   if (orderSheet) {
@@ -21,17 +42,6 @@ function onOpen() {
   if (budgetSheet) {
     clearLegacySheetTriggerCheckboxes_(budgetSheet);
   }
-
-  SpreadsheetApp.getUi()
-    .createMenu("発注管理")
-    .addItem("予算・実績の曜日を更新", "syncBudgetWeekdaysFromD2")
-    .addSeparator()
-    .addItem("スマレジ実績を取得（当日分）", "runSmaregiDailyAutoImport")
-    .addItem("スマレジ実績を取得（日付指定）", "promptAndImportSmaregiActuals_")
-    .addItem("スマレジ日次自動取得トリガーを設定", "setupSmaregiDailyTrigger")
-    .addSeparator()
-    .addItem("バックログ系データを一括削除（デバッグ用）", "resetBacklogRelatedHistory")
-    .addToUi();
 }
 
 const runSimulationPipeline = () => {
