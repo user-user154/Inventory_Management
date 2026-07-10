@@ -39,6 +39,41 @@ const getSmaregiCredentials_ = () => {
   return { clientId: clientId, clientSecret: clientSecret };
 };
 
+/**
+ * 外部API連携のトークンキャッシュ管理（スマレジ専用ではなく汎用ユーティリティ）
+ * 今後別のAPI連携を追加する際も rememberApiTokenCacheKey_ でキーを記録しておけば、
+ * clearApiTokenCaches() で認証情報・スコープ変更後の再認証がまとめて行える。
+ */
+const API_TOKEN_CACHE_KEYS_PROP_ = "API_TOKEN_CACHE_KEYS";
+
+/** キャッシュにトークンを保存する際、後で一括クリアできるようキー名を記録しておく */
+const rememberApiTokenCacheKey_ = (cacheKey) => {
+  let props = PropertiesService.getScriptProperties();
+  let raw = props.getProperty(API_TOKEN_CACHE_KEYS_PROP_);
+  let keys = raw ? JSON.parse(raw) : [];
+  if (keys.indexOf(cacheKey) === -1) {
+    keys.push(cacheKey);
+    props.setProperty(API_TOKEN_CACHE_KEYS_PROP_, JSON.stringify(keys));
+  }
+};
+
+/**
+ * 記録済みのAPIトークンキャッシュを一括クリア（メニュー・エディタどちらからも実行可能）
+ * クライアントID/シークレットの変更、スコープ追加、権限エラーの再現テストなどの後に使う。
+ */
+function clearApiTokenCaches() {
+  let props = PropertiesService.getScriptProperties();
+  let raw = props.getProperty(API_TOKEN_CACHE_KEYS_PROP_);
+  let keys = raw ? JSON.parse(raw) : [];
+  if (keys.length === 0) {
+    notifyUser("クリア対象のAPIトークンキャッシュはありません。");
+    return;
+  }
+  CacheService.getScriptCache().removeAll(keys);
+  props.deleteProperty(API_TOKEN_CACHE_KEYS_PROP_);
+  notifyUser(`APIトークンキャッシュをクリアしました（${keys.length}件）。`);
+}
+
 /** OAuth2 client_credentials でアクセストークンを取得（有効期限-60秒でキャッシュ） */
 const getSmaregiAccessToken_ = (scope) => {
   let cache = CacheService.getScriptCache();
@@ -67,6 +102,7 @@ const getSmaregiAccessToken_ = (scope) => {
   let accessToken = json.access_token;
   let expiresIn = Number(json.expires_in) || 3600;
   cache.put(cacheKey, accessToken, Math.max(60, expiresIn - 60));
+  rememberApiTokenCacheKey_(cacheKey);
   return accessToken;
 };
 
