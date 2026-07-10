@@ -250,16 +250,23 @@ const fetchSmaregiTransactions_ = (dateStr, storeId) => {
   return allTransactions;
 };
 
-/** 実績出数ログの見出しを用意（無ければ新規シート作成） */
+/**
+ * 実績出数ログの見出しを用意（無ければ新規シート作成）
+ * 見出し行全体を期待値と比較し、1列でもズレていれば書き直す
+ * （A1の"日付"だけを見ていると、列追加（例: 店舗列）で見出しとデータがズレたまま気づけない）
+ */
 const ensureActualSalesLogSheet_ = (ss) => {
   let sheet = ss.getSheetByName(SHEET_NAMES.ACTUAL_SALES_LOG);
   if (!sheet) {
     sheet = ss.insertSheet(SHEET_NAMES.ACTUAL_SALES_LOG);
     Logger.log(`[スマレジ] シート「${SHEET_NAMES.ACTUAL_SALES_LOG}」を新規作成`);
   }
-  let firstCell = String(sheet.getRange(1, 1).getValue() || "").trim();
-  if (firstCell !== ACTUAL_SALES_LOG_HEADERS_[0]) {
+  let currentHeaders = sheet.getRange(1, 1, 1, ACTUAL_SALES_LOG_HEADERS_.length).getValues()[0]
+    .map((v) => { return String(v == null ? "" : v).trim(); });
+  let matches = ACTUAL_SALES_LOG_HEADERS_.every((h, i) => { return currentHeaders[i] === h; });
+  if (!matches) {
     sheet.getRange(1, 1, 1, ACTUAL_SALES_LOG_HEADERS_.length).setValues([ACTUAL_SALES_LOG_HEADERS_]);
+    Logger.log(`[スマレジ] 「${SHEET_NAMES.ACTUAL_SALES_LOG}」の見出し行を更新しました`);
   }
   return sheet;
 };
