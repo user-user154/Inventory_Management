@@ -18,6 +18,7 @@ function onOpen() {
     .addItem("スマレジ日次自動取得トリガーを設定", "setupSmaregiDailyTrigger")
     .addItem("onEdit連携トリガーを設定（長時間実行用・任意）", "setupOnEditInstallableTrigger")
     .addSeparator()
+    .addItem("APIトークンキャッシュをクリア（デバッグ用）", "clearApiTokenCaches")
     .addItem("バックログ系データを一括削除（デバッグ用）", "resetBacklogRelatedHistory")
     .addToUi();
 
