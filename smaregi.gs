@@ -14,8 +14,8 @@
  * 3. メニュー「発注管理」→「スマレジ店舗一覧を更新」を実行し、予算・実績 D1 で対象店舗を選択
  * 4. メニュー「発注管理」→「スマレジ日次自動取得トリガーを設定」を一度だけ実行
  *
- * 既知の未対応事項: 返品取引(returnSales=1)は現状 fetchSmaregiTransactionDetails_ の
- * 集計対象から特に区別していない（通常取引の details をそのまま合算）。返品が多い店舗では
+ * 既知の未対応事項: 返品取引(returnSales=1)は現状 fetchSmaregiTransactions_ の
+ * 集計対象から特に区別していない（通常取引をそのまま合算）。返品が多い店舗では
  * 実データで実績と突き合わせて要検証。
  */
 
@@ -202,16 +202,18 @@ const setupSmaregiStoreDropdown_ = () => {
 };
 
 /**
- * 指定日(JST 00:00〜23:59:59)・指定店舗の取引明細を取得
- * 通常取引(transactionHeadDivision=1)かつ取消でない(cancelDivision=0)ものだけを対象にする
+ * 指定日(JST 00:00〜23:59:59)・指定店舗の取引を取得
+ * 通常取引(transactionHeadDivision=1)かつ取消でない(cancelDivision=0)ものだけを対象にする。
+ * 明細(details)だけでなく取引ヘッダーの total（レジ側で確定済みの合計金額）も保持し、
+ * 金額集計は明細行の再計算ではなくこの total の合計を使う（丸め誤差の蓄積を避けるため）。
  */
-const fetchSmaregiTransactionDetails_ = (dateStr, storeId) => {
+const fetchSmaregiTransactions_ = (dateStr, storeId) => {
   let token = getSmaregiAccessToken_("pos.transactions:read");
   let fromIso = `${dateStr}T00:00:00+09:00`;
   let toIso = `${dateStr}T23:59:59+09:00`;
   let baseUrl = `${SMAREGI_CONFIG.apiBase}/${SMAREGI_CONFIG.contractId}/pos/transactions`;
 
-  let allDetails = [];
+  let allTransactions = [];
   let limit = 100;
   let maxPages = 50; // 安全弁（1日あたり最大5000取引を想定。想定外の応答形式での無限ループを防ぐ）
 
@@ -239,13 +241,13 @@ const fetchSmaregiTransactionDetails_ = (dateStr, storeId) => {
     transactions.forEach((t) => {
       if (String(t.transactionHeadDivision) !== "1") return; // 通常取引以外(入金・ポイント等)は除外
       if (String(t.cancelDivision) === "1") return; // 取消済みは除外
-      (t.details || []).forEach((d) => { allDetails.push(d); });
+      allTransactions.push(t);
     });
 
     if (transactions.length < limit) break;
   }
 
-  return allDetails;
+  return allTransactions;
 };
 
 /** 実績出数ログの見出しを用意（無ければ新規シート作成） */
@@ -290,9 +292,22 @@ const writeActualSalesLogForDate_ = (sheet, dateStr, storeId, aggregatedRows) =>
 /**
  * 指定日・指定店舗のスマレジ実績を取得し「実績出数ログ」へ書込み、「予算・実績」の実績列も更新する
  * （実績列は店舗区分を持たないため、現在選択中の店舗の合計金額でそのまま上書きする）
+ *
+ * 金額合計は明細行(unitDiscountedSum)の再計算ではなく、取引ヘッダーの total（レジ側で
+ * 確定済みの合計金額）を合算して使う。明細の税抜換算を1行ずつ行うと端数処理が積み重なり
+ * 実際のPOS集計とズレるため、合計は取引単位でまとめてから1回だけ税抜換算する。
+ * 商品別の内訳（実績出数ログ用の数量・按分金額）は引き続き明細行から作る。
  */
 const importSmaregiDailyActuals_ = (dateStr, store) => {
-  let details = fetchSmaregiTransactionDetails_(dateStr, store.storeId);
+  let transactions = fetchSmaregiTransactions_(dateStr, store.storeId);
+
+  let details = [];
+  let totalIncTax = 0;
+  transactions.forEach((t) => {
+    (t.details || []).forEach((d) => { details.push(d); });
+    totalIncTax += Number(t.total) || 0;
+  });
+
   let rows = details.map((d) => {
     return { rawName: d.productName, qty: d.quantity, salesIncTax: d.unitDiscountedSum };
   });
@@ -302,7 +317,7 @@ const importSmaregiDailyActuals_ = (dateStr, store) => {
   let logSheet = ensureActualSalesLogSheet_(ss);
   writeActualSalesLogForDate_(logSheet, dateStr, store.storeId, aggregated);
 
-  let totalAmount = aggregated.reduce((sum, r) => { return sum + (Number(r.salesAmount) || 0); }, 0);
+  let totalAmount = convertPosSalesToExTax(totalIncTax);
   let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
   let budgetWritten = budgetSheet ? writeBudgetRatioAtDate_(budgetSheet, dateStr, "実績", totalAmount) : false;
 
