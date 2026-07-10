@@ -43,6 +43,7 @@ function onOpen() {
   let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
   if (budgetSheet) {
     clearLegacySheetTriggerCheckboxes_(budgetSheet);
+    setupBudgetStartDateDropdown_(budgetSheet);
   }
 }
 

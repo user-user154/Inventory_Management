@@ -2201,6 +2201,51 @@ const resolveOrderSheetActionMenuItem_ = (sheet) => {
   return null;
 };
 
+/**
+ * 予算・実績 D2（年月アンカー、日は無視される）: 前後数ヶ月の "yyyy年M月" 一覧をプルダウン化。
+ * 外部APIを使わないため onOpen（シンプルトリガー）から呼んでも権限エラーにならず、
+ * 開くたびに現在月基準へレンジが自動スライドする。
+ */
+const BUDGET_START_DATE_CELL_ = "D2";
+const BUDGET_START_DATE_MONTHS_BEFORE_ = 12;
+const BUDGET_START_DATE_MONTHS_AFTER_ = 3;
+
+const setupBudgetStartDateDropdown_ = (budgetSheet) => {
+  if (!budgetSheet) return;
+
+  let now = new Date();
+  let baseYear = now.getFullYear();
+  let baseMonth = now.getMonth();
+
+  let options = [];
+  for (let offset = -BUDGET_START_DATE_MONTHS_BEFORE_; offset <= BUDGET_START_DATE_MONTHS_AFTER_; offset++) {
+    options.push(new Date(baseYear, baseMonth + offset, 1));
+  }
+
+  let props = PropertiesService.getScriptProperties();
+  props.setProperty("SKIP_BUDGET_WEEKDAY_ONEDIT", "1");
+  try {
+    let cell = budgetSheet.getRange(BUDGET_START_DATE_CELL_);
+    cell.setNumberFormat('yyyy"年"M"月"');
+
+    let rule = SpreadsheetApp.newDataValidation()
+      .requireValueInList(options, true)
+      .setAllowInvalid(false)
+      .build();
+    cell.setDataValidation(rule);
+
+    let current = parseDateValue_(cell.getValue());
+    let inRange = current && options.some((d) => {
+      return d.getFullYear() === current.getFullYear() && d.getMonth() === current.getMonth();
+    });
+    if (!inRange) {
+      cell.setValue(new Date(baseYear, baseMonth, 1));
+    }
+  } finally {
+    props.deleteProperty("SKIP_BUDGET_WEEKDAY_ONEDIT");
+  }
+};
+
 /** 指示書 A1 プルダウンと B1 チェックボックスを整備 */
 const setupOrderSheetActionControls_ = (sheet) => {
   if (!sheet || sheet.getName() !== SHEET_NAMES.ORDER_FORM) return;
