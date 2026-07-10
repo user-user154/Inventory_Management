@@ -140,11 +140,16 @@ const fillBudgetWeekdaysForRows_ = (sheet, startRow, numRows) => {
   }
 };
 
-/** D2 の日付から年・月のみ取得（日付部分は使わない） */
+/** D2 から年・月のみ取得（Date値、または "yyyy年M月" 形式の文字列のどちらでも可） */
 const findBudgetYearMonthFromD2_ = (sheet) => {
-  let d = parseDateValue_(sheet.getRange("D2").getValue());
-  if (!d) return null;
-  return { year: d.getFullYear(), month: d.getMonth() };
+  let raw = sheet.getRange("D2").getValue();
+  let d = parseDateValue_(raw);
+  if (d) return { year: d.getFullYear(), month: d.getMonth() };
+
+  let m = String(raw == null ? "" : raw).trim().match(/^([0-9]{4})年\s*([0-9]{1,2})月$/);
+  if (m) return { year: Number(m[1]), month: Number(m[2]) - 1 };
+
+  return null;
 };
 
 /** A列の「日」: 1,2,3… または日だけ持つ Date */

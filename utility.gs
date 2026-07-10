@@ -2203,12 +2203,18 @@ const resolveOrderSheetActionMenuItem_ = (sheet) => {
 
 /**
  * 予算・実績 D2（年月アンカー、日は無視される）: 前後数ヶ月の "yyyy年M月" 一覧をプルダウン化。
+ * セルには表示用と同じテキスト（例: "2026年7月"）をそのまま入れる
+ * （Date値だと選択肢一覧がSheets標準の日付表記になり読みにくいため文字列で統一）。
  * 外部APIを使わないため onOpen（シンプルトリガー）から呼んでも権限エラーにならず、
  * 開くたびに現在月基準へレンジが自動スライドする。
  */
 const BUDGET_START_DATE_CELL_ = "D2";
 const BUDGET_START_DATE_MONTHS_BEFORE_ = 12;
 const BUDGET_START_DATE_MONTHS_AFTER_ = 3;
+
+const formatBudgetYearMonthLabel_ = (year, month) => {
+  return `${year}年${month + 1}月`;
+};
 
 const setupBudgetStartDateDropdown_ = (budgetSheet) => {
   if (!budgetSheet) return;
@@ -2219,14 +2225,14 @@ const setupBudgetStartDateDropdown_ = (budgetSheet) => {
 
   let options = [];
   for (let offset = -BUDGET_START_DATE_MONTHS_BEFORE_; offset <= BUDGET_START_DATE_MONTHS_AFTER_; offset++) {
-    options.push(new Date(baseYear, baseMonth + offset, 1));
+    let d = new Date(baseYear, baseMonth + offset, 1);
+    options.push(formatBudgetYearMonthLabel_(d.getFullYear(), d.getMonth()));
   }
 
   let props = PropertiesService.getScriptProperties();
   props.setProperty("SKIP_BUDGET_WEEKDAY_ONEDIT", "1");
   try {
     let cell = budgetSheet.getRange(BUDGET_START_DATE_CELL_);
-    cell.setNumberFormat('yyyy"年"M"月"');
 
     let rule = SpreadsheetApp.newDataValidation()
       .requireValueInList(options, true)
@@ -2234,12 +2240,9 @@ const setupBudgetStartDateDropdown_ = (budgetSheet) => {
       .build();
     cell.setDataValidation(rule);
 
-    let current = parseDateValue_(cell.getValue());
-    let inRange = current && options.some((d) => {
-      return d.getFullYear() === current.getFullYear() && d.getMonth() === current.getMonth();
-    });
-    if (!inRange) {
-      cell.setValue(new Date(baseYear, baseMonth, 1));
+    let current = String(cell.getValue() || "").trim();
+    if (options.indexOf(current) === -1) {
+      cell.setValue(formatBudgetYearMonthLabel_(baseYear, baseMonth));
     }
   } finally {
     props.deleteProperty("SKIP_BUDGET_WEEKDAY_ONEDIT");
