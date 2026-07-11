@@ -336,11 +336,34 @@ const importSmaregiDailyActuals_ = (dateStr, store) => {
   return { dateStr: dateStr, storeId: store.storeId, productCount: aggregated.length, totalAmount: totalAmount };
 };
 
-/** 当日分を取得（毎晩22:45ごろの時間トリガーから呼ぶ想定。営業終了間際までの実績を取り込む） */
+/** 当日分を取得（メニューからの手動再取得用。営業終了間際までの実績を取り込む） */
 const runSmaregiDailyAutoImport = () => {
   let budgetSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
   let store = resolveSelectedSmaregiStore_(budgetSheet);
   importSmaregiDailyActuals_(formatJstDate_(new Date()), store);
+};
+
+/**
+ * 毎晩22:45ごろの時間トリガー本体: 当日分のスマレジ実績を取り込み、
+ * その実績を使って翌日の仕込み・発注指示を計算し指示書へ反映する。
+ * 例: 22:45に7/1の実績を取込→指示書B2を7/2に設定→7/2の計算を実行。
+ */
+const runDailyPosImportAndPlanNextDay = () => {
+  let ss = SpreadsheetApp.getActiveSpreadsheet();
+  let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  let store = resolveSelectedSmaregiStore_(budgetSheet);
+
+  let today = formatJstDate_(new Date());
+  importSmaregiDailyActuals_(today, store);
+
+  let orderSheet = ss.getSheetByName(SHEET_NAMES.ORDER_FORM);
+  if (!orderSheet) {
+    throw new Error(`「${SHEET_NAMES.ORDER_FORM}」シートが見つかりません。`);
+  }
+  let tomorrow = addDaysToDateStr_(today, 1);
+  orderSheet.getRange("B2").setValue(new Date(`${tomorrow}T12:00:00`));
+
+  runSimulationPipeline();
 };
 
 /** 日付を指定して手動再取得（空欄なら本日、対象店舗は予算・実績 D1 の選択に従う） */
@@ -367,17 +390,24 @@ const promptAndImportSmaregiActuals_ = () => {
   importSmaregiDailyActuals_(dateStr, store);
 };
 
-const SMAREGI_DAILY_TRIGGER_HANDLER_ = "runSmaregiDailyAutoImport";
+const SMAREGI_DAILY_TRIGGER_HANDLER_ = "runDailyPosImportAndPlanNextDay";
+/** 過去バージョンのトリガーハンドラ名（残っていたら置き換える） */
+const SMAREGI_DAILY_TRIGGER_LEGACY_HANDLERS_ = ["runSmaregiDailyAutoImport"];
 
-/** 日次自動取得トリガーを設定（初回のみ手動実行。二重登録は防止） */
+/** 日次自動トリガーを設定（旧トリガーや重複があれば削除してから作り直す） */
 const setupSmaregiDailyTrigger = () => {
-  let alreadyExists = ScriptApp.getProjectTriggers().some((t) => {
-    return t.getHandlerFunction() === SMAREGI_DAILY_TRIGGER_HANDLER_;
+  let removed = 0;
+  ScriptApp.getProjectTriggers().forEach((t) => {
+    let fn = t.getHandlerFunction();
+    if (fn === SMAREGI_DAILY_TRIGGER_HANDLER_ || SMAREGI_DAILY_TRIGGER_LEGACY_HANDLERS_.indexOf(fn) !== -1) {
+      ScriptApp.deleteTrigger(t);
+      removed++;
+    }
   });
-  if (alreadyExists) {
-    notifyUser("スマレジ日次自動取得トリガーは既に設定済みです。");
-    return;
-  }
+
   ScriptApp.newTrigger(SMAREGI_DAILY_TRIGGER_HANDLER_).timeBased().everyDays(1).atHour(22).nearMinute(45).create();
-  notifyUser("スマレジ日次自動取得トリガーを設定しました（毎日22:45ごろ、当日分を自動取得）。");
+  notifyUser(
+    "スマレジ日次自動取得トリガーを設定しました（毎日22:45ごろ、当日分の実績取得→翌日の仕込み・発注計算まで自動実行）。"
+    + (removed > 0 ? `既存トリガー${removed}件を置き換えました。` : "")
+  );
 };
