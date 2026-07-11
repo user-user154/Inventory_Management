@@ -15,6 +15,7 @@ function onOpen() {
     .addItem("スマレジ店舗一覧を更新（予算・実績 D1）", "setupSmaregiStoreDropdown_")
     .addItem("スマレジ実績を取得（当日分）", "runSmaregiDailyAutoImport")
     .addItem("スマレジ実績を取得（日付指定）", "promptAndImportSmaregiActuals_")
+    .addItem("実績取得→翌日の仕込み・発注計算を今すぐ実行", "runDailyPosImportAndPlanNextDay")
     .addItem("スマレジ日次自動取得トリガーを設定", "setupSmaregiDailyTrigger")
     .addItem("onEdit連携トリガーを設定（長時間実行用・任意）", "setupOnEditInstallableTrigger")
     .addSeparator()
