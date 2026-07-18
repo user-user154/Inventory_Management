@@ -1,6 +1,9 @@
 # macOS
 .DS_Store
 
+# clasp（デバッグ用のリモート専用スクリプト）
+test.js
+
 # Cursor / editor
 .cursor/
 
