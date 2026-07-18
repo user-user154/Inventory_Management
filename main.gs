@@ -18,6 +18,7 @@ function onOpen() {
     .addItem("実績取得→翌日の仕込み・発注計算を今すぐ実行", "runDailyPosImportAndPlanNextDay")
     .addItem("スマレジ日次自動取得トリガーを設定", "setupSmaregiDailyTrigger")
     .addItem("onEdit連携トリガーを設定（長時間実行用・任意）", "setupOnEditInstallableTrigger")
+    .addItem("祝日キャッシュを更新（1年分取得）", "runRefreshJapaneseHolidayCache")
     .addSeparator()
     .addItem("APIトークンキャッシュをクリア（デバッグ用）", "clearApiTokenCaches")
     .addItem("バックログ系データを一括削除（デバッグ用）", "resetBacklogRelatedHistory")
@@ -46,6 +47,16 @@ function onOpen() {
     clearLegacySheetTriggerCheckboxes_(budgetSheet);
     setupBudgetStartDateDropdown_(budgetSheet);
   }
+}
+
+/**
+ * 祝日キャッシュ（PropertiesService）を手動更新（メニュー・エディタどちらからも実行可能）
+ * 通常はシミュレーション実行時に残り有効期間が少なくなると自動更新されるが、
+ * 導入直後の初回取得や、任意タイミングでの更新確認に使う。
+ */
+function runRefreshJapaneseHolidayCache() {
+  let cache = refreshJapaneseHolidayCache_(HOLIDAY_CACHE_FETCH_DAYS_);
+  notifyUser(`祝日キャッシュを更新しました: ${cache.rangeStart}〜${cache.rangeEnd}（${cache.dates.length}件）`);
 }
 
 const runSimulationPipeline = () => {
