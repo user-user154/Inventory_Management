@@ -1209,10 +1209,10 @@ const ensureLot14OrderEntry_ = (todayOrders, rName, rawRow, orderDayIdx, ctx, ho
 
 // ===== DEBUG_SHIODARE_START（デバッグ用・削除可） =====
 const DEBUG_SHIODARE_TRACK_ENABLED_ = true;
-const DEBUG_SHIODARE_RAW_NAME_ = "ジンギスカン(原料)";
-const DEBUG_AWASE_SHIODARE_PREP_NAME_ = "";
+const DEBUG_SHIODARE_RAW_NAME_ = "米";
+const DEBUG_AWASE_SHIODARE_PREP_NAME_ = "ご飯";
 
-/** 発注計算・14kg合算のトラック対象（原材料「ジンギスカン(原料)」のみ） */
+/** 発注計算・14kg合算のトラック対象（原材料「米」のみ） */
 const isDebugShiodareOrderTarget_ = (rName) => {
   return DEBUG_SHIODARE_TRACK_ENABLED_ && rName === DEBUG_SHIODARE_RAW_NAME_;
 };
@@ -1258,7 +1258,7 @@ const describePrepUsesRawPerLot_ = (prepName, rawName, ctx) => {
 
 const logDebugShiodare_ = (stage, label, fields) => {
   if (!DEBUG_SHIODARE_TRACK_ENABLED_) return;
-  let parts = [`[DEBUGジンギスカン] ${stage}`, `対象=${label}`];
+  let parts = [`[DEBUG米] ${stage}`, `対象=${label}`];
   Object.keys(fields || {}).forEach((k) => {
     parts.push(`${k}=${fields[k]}`);
   });
@@ -1303,7 +1303,7 @@ const trackDebugShiodareDailyDemand_ = (ctx, payload) => {
       awaseFields.仕込み量 = Math.round(awaseProc.aiQty) + (awaseProc.unit || "");
     }
     let recipeNote = describePrepUsesRawPerLot_(prepName, rawName, ctx);
-    if (recipeNote) awaseFields.ジンギスカンレシピ = recipeNote;
+    if (recipeNote) awaseFields.米レシピ = recipeNote;
     logDebugShiodare_("日次仕込み", prepName, awaseFields);
   }
 };
