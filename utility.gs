@@ -1209,10 +1209,10 @@ const ensureLot14OrderEntry_ = (todayOrders, rName, rawRow, orderDayIdx, ctx, ho
 
 // ===== DEBUG_SHIODARE_START（デバッグ用・削除可） =====
 const DEBUG_SHIODARE_TRACK_ENABLED_ = true;
-const DEBUG_SHIODARE_RAW_NAME_ = "キャベツ";
+const DEBUG_SHIODARE_RAW_NAME_ = "ジンギスカン";
 const DEBUG_AWASE_SHIODARE_PREP_NAME_ = "";
 
-/** 発注計算・14kg合算のトラック対象（原材料「キャベツ」のみ） */
+/** 発注計算・14kg合算のトラック対象（原材料「ジンギスカン」のみ） */
 const isDebugShiodareOrderTarget_ = (rName) => {
   return DEBUG_SHIODARE_TRACK_ENABLED_ && rName === DEBUG_SHIODARE_RAW_NAME_;
 };
@@ -1258,7 +1258,7 @@ const describePrepUsesRawPerLot_ = (prepName, rawName, ctx) => {
 
 const logDebugShiodare_ = (stage, label, fields) => {
   if (!DEBUG_SHIODARE_TRACK_ENABLED_) return;
-  let parts = [`[DEBUGキャベツ] ${stage}`, `対象=${label}`];
+  let parts = [`[DEBUGジンギスカン] ${stage}`, `対象=${label}`];
   Object.keys(fields || {}).forEach((k) => {
     parts.push(`${k}=${fields[k]}`);
   });
@@ -1303,7 +1303,7 @@ const trackDebugShiodareDailyDemand_ = (ctx, payload) => {
       awaseFields.仕込み量 = Math.round(awaseProc.aiQty) + (awaseProc.unit || "");
     }
     let recipeNote = describePrepUsesRawPerLot_(prepName, rawName, ctx);
-    if (recipeNote) awaseFields.キャベツレシピ = recipeNote;
+    if (recipeNote) awaseFields.ジンギスカンレシピ = recipeNote;
     logDebugShiodare_("日次仕込み", prepName, awaseFields);
   }
 };
@@ -2533,6 +2533,7 @@ const getPrepOrderSheetDisplayRule_ = (prepName) => {
     "カットタン刺し": { unit: "パック", multiplier: 1 },
     "カットハツ刺し": { unit: "パック", multiplier: 1 },
     "カットがつミノ": { unit: "パック", multiplier: 1 },
+    "カットカメノコ": { unit: "パック", multiplier: 1 },
     "仕込みヤゲン軟骨": { unit: "パック", multiplier: 1 },
     "スライスすだち": { unit: "個", multiplier: 1 },
     "小松菜のナムル": { unit: "束", multiplier: 6 },
