@@ -14,8 +14,9 @@ const PREP_LOT_EXPIRY_RULES_ = {
   "カットレバー": "next_day"
 };
 
-const isPrepLotManagedItem_ = (itemName) => {
-  return Object.prototype.hasOwnProperty.call(PREP_LOT_EXPIRY_RULES_, itemName);
+/** ロット繰越管理の対象は全仕込み品（期限ルールは PREP_LOT_EXPIRY_RULES_ 定義品のみ適用） */
+const getAllPrepItemNames_ = (ctx) => {
+  return Object.keys((ctx && ctx.preparationRecipes) || {});
 };
 
 const isMeatSashiItem_ = (itemName) => {
@@ -68,7 +69,7 @@ const initPrepLotInventory_ = (ctx) => {
   let lots = {};
   let openDate = ctx.inventoryDateStr || ctx.targetDatesStr[0];
 
-  Object.keys(PREP_LOT_EXPIRY_RULES_).forEach((pName) => {
+  getAllPrepItemNames_(ctx).forEach((pName) => {
     lots[pName] = [];
     let stock = ctx.prepStockObj && ctx.prepStockObj[pName];
     if (!stock) return;
@@ -92,7 +93,7 @@ const initPrepLotInventory_ = (ctx) => {
 /** 期限切れロットを廃棄し、廃棄した仕込み品量（仕込み単位）を返す */
 const purgeExpiredPrepLots_ = (lots, currentDateStr, ctx) => {
   let wastePrepQty = {};
-  Object.keys(PREP_LOT_EXPIRY_RULES_).forEach((pName) => {
+  getAllPrepItemNames_(ctx).forEach((pName) => {
     if (!lots[pName] || lots[pName].length === 0) return;
 
     let prep = ctx && ctx.preparationRecipes ? ctx.preparationRecipes[pName] : null;
@@ -121,7 +122,7 @@ const purgeExpiredPrepLots_ = (lots, currentDateStr, ctx) => {
 
 /** FIFOでロット在庫を消費し、仕込み需要を控除 */
 const reducePrepLotDemandByLots_ = (prepDemand, lots, ctx) => {
-  Object.keys(PREP_LOT_EXPIRY_RULES_).forEach((pName) => {
+  getAllPrepItemNames_(ctx).forEach((pName) => {
     let demand = prepDemand[pName];
     if (!demand || demand <= 0) return;
 
@@ -158,9 +159,9 @@ const consumePrepLotsFifo_ = (itemLots, qty, packSize) => {
 };
 
 /** 仕込み確定前のロット管理品需要残（ロット切上げ前の量）を退避 */
-const snapshotPrepLotDemand_ = (prepDemand) => {
+const snapshotPrepLotDemand_ = (prepDemand, ctx) => {
   let snap = {};
-  Object.keys(PREP_LOT_EXPIRY_RULES_).forEach((pName) => {
+  getAllPrepItemNames_(ctx).forEach((pName) => {
     let demand = prepDemand[pName];
     if (demand && demand > 0) snap[pName] = demand;
   });
@@ -171,7 +172,7 @@ const snapshotPrepLotDemand_ = (prepDemand) => {
  * 当日仕込みをロット在庫へ登録し、需要分だけ消費（切上げ余りは翌日繰越）
  */
 const applyPrepLotsAfterFinalize_ = (lots, inProcess, remainderByItem, dateStr, ctx) => {
-  Object.keys(PREP_LOT_EXPIRY_RULES_).forEach((pName) => {
+  getAllPrepItemNames_(ctx).forEach((pName) => {
     let prep = ctx.preparationRecipes[pName];
     if (!prep) return;
 
@@ -625,25 +626,6 @@ const calcPrepInstructionYieldLossRaw_ = (ctx, inProcess, unitYieldLoss) => {
 /**
  * 1日分の需要計算（直消費 / 仕込み展開消費を分離）
  */
-/** 棚卸し済み仕込み品在庫を初日の仕込み需要から差し引く（ロット管理品は別途処理） */
-const reducePrepDemandByStock_ = (prepDemand, ctx, options) => {
-  options = options || {};
-  if (!ctx || !ctx.prepStockObj) return;
-  Object.keys(prepDemand).forEach((pName) => {
-    if (options.skipPrepLotManaged && isPrepLotManagedItem_(pName)) return;
-    let stock = ctx.prepStockObj[pName];
-    if (!stock) return;
-    let prep = ctx.preparationRecipes[pName];
-    if (!prep) return;
-
-    let prepUnit = String(prep.processUnit).trim();
-    let stockInPrepUnit = convertPrepStockToProcessQty_(stock, prep, pName, ctx);
-    if (stockInPrepUnit <= 0) return;
-
-    prepDemand[pName] = Math.max(0, prepDemand[pName] - stockInPrepUnit);
-  });
-};
-
 const scaleDemandMap_ = (src, factor) => {
   let out = {};
   if (!factor) return out;
@@ -792,8 +774,6 @@ const precomputeDailyDemands = (ctx, unitMenuDemands, unitCostRawDemand, unitPre
   let wasteUnit = unitPrepWasteRaw || ctx._unitPrepWasteRaw || precomputeUnitPrepWasteRaw_(ctx);
   let byDay = [];
   let prepLots = initPrepLotInventory_(ctx);
-  let orderDayIdx = getOrderDayIndexInCtx_(ctx);
-  let inventoryPriorMode = isInventoryExactlyPriorDay_(ctx);
 
   for (let d = 0; d < ctx.simDays; d++) {
     let dateStr = ctx.targetDatesStr[d];
@@ -822,11 +802,7 @@ const precomputeDailyDemands = (ctx, unitMenuDemands, unitCostRawDemand, unitPre
     let wastePrepQty = purgeExpiredPrepLots_(prepLots, dateStr, ctx);
     reducePrepLotDemandByLots_(prepDemand, prepLots, ctx);
 
-    let prepLotRemainder = snapshotPrepLotDemand_(prepDemand);
-
-    if (d === 0 || (inventoryPriorMode && d === orderDayIdx)) {
-      reducePrepDemandByStock_(prepDemand, ctx, { skipPrepLotManaged: true });
-    }
+    let prepLotRemainder = snapshotPrepLotDemand_(prepDemand, ctx);
 
     let finalized = finalizeDailyDemandsFromScaled_(ctx, prepDemand, directRawDemand);
     applyPrepLotsAfterFinalize_(prepLots, finalized.inProcess, prepLotRemainder, dateStr, ctx);
