@@ -6,17 +6,33 @@
  * ロット管理＋期限廃棄対象の仕込み品（コード側で一元管理）
  * - meat_sashi: 金曜仕込みは3日間、通常は仕込み日+翌日+翌々日
  * - next_day: 仕込み日+翌日まで（曜日共通）。納品日に当日分をカット、翌日分は翌日カット
+ * - same_day: 仕込み日当日限り。翌日には持ち越さず廃棄（繰越禁止）
  */
 const PREP_LOT_EXPIRY_RULES_ = {
   "カットタン刺し": "meat_sashi",
   "カットハツ刺し": "meat_sashi",
   "カットレバ刺し": "meat_sashi",
-  "カットレバー": "next_day"
+  "カットレバー": "next_day",
+  "ご飯": "same_day"
 };
 
 /** ロット繰越管理の対象は全仕込み品（期限ルールは PREP_LOT_EXPIRY_RULES_ 定義品のみ適用） */
 const getAllPrepItemNames_ = (ctx) => {
   return Object.keys((ctx && ctx.preparationRecipes) || {});
+};
+
+/** 翌日予算50%先読みを加算しない仕込み品（当日炊飯・当日限りのご飯など） */
+const PREP_LOOKAHEAD_EXCLUDED_ITEMS_ = {
+  "ご飯": true
+};
+
+/** 翌日先読み分の需要マップから対象外品目を除外する */
+const stripExcludedLookaheadItems_ = (demandMap) => {
+  let out = Object.assign({}, demandMap);
+  Object.keys(PREP_LOOKAHEAD_EXCLUDED_ITEMS_).forEach((pName) => {
+    delete out[pName];
+  });
+  return out;
 };
 
 const isMeatSashiItem_ = (itemName) => {
@@ -38,6 +54,11 @@ const isPrepLotExpired_ = (itemName, dateOpenedStr, currentDateStr) => {
   if (!dateOpenedStr || !currentDateStr) return false;
 
   let diffDays = diffCalendarDaysJst_(dateOpenedStr, currentDateStr);
+
+  if (ruleType === "same_day") {
+    // 仕込み当日のみ使用可 → 翌日には持ち越さず廃棄
+    return diffDays >= 1;
+  }
 
   if (ruleType === "next_day") {
     // 仕込み日+翌日まで使用可 → 2日目で廃棄
@@ -787,14 +808,15 @@ const precomputeDailyDemands = (ctx, unitMenuDemands, unitCostRawDemand, unitPre
     if (usedActual) {
       // 実績出数がある日（今日を含む過去日）は比率予測ではなく実際の商品別出数をそのまま展開する
       let actualExpanded = expandActualDayDemands_(ctx, actualRows);
-      let lookaheadPrepDemand = scaleDemandMap_(unit.prepDemand, lookaheadAmount);
+      let lookaheadPrepDemand = stripExcludedLookaheadItems_(scaleDemandMap_(unit.prepDemand, lookaheadAmount));
       prepDemand = mergeRawDemandMaps_(actualExpanded.prepDemand, lookaheadPrepDemand);
       directRawDemand = actualExpanded.directRawDemand;
       menuRawDemand = finalizeCostRawDemandFromScaled_(
         ctx, actualExpanded.prepDemand, actualExpanded.directRawDemand, { skipYield: true }
       );
     } else {
-      prepDemand = scaleDemandMap_(unit.prepDemand, factor + lookaheadAmount);
+      let lookaheadPrepDemand = stripExcludedLookaheadItems_(scaleDemandMap_(unit.prepDemand, lookaheadAmount));
+      prepDemand = mergeRawDemandMaps_(scaleDemandMap_(unit.prepDemand, factor), lookaheadPrepDemand);
       directRawDemand = scaleDemandMap_(unit.directRawDemand, factor);
       menuRawDemand = factor > 0 ? scaleDemandMap_(unitCostRaw, factor) : {};
     }
