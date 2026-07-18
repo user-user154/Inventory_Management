@@ -1209,10 +1209,10 @@ const ensureLot14OrderEntry_ = (todayOrders, rName, rawRow, orderDayIdx, ctx, ho
 
 // ===== DEBUG_SHIODARE_START（デバッグ用・削除可） =====
 const DEBUG_SHIODARE_TRACK_ENABLED_ = true;
-const DEBUG_SHIODARE_RAW_NAME_ = "ジンギスカン";
+const DEBUG_SHIODARE_RAW_NAME_ = "ジンギスカン(原料)";
 const DEBUG_AWASE_SHIODARE_PREP_NAME_ = "";
 
-/** 発注計算・14kg合算のトラック対象（原材料「ジンギスカン」のみ） */
+/** 発注計算・14kg合算のトラック対象（原材料「ジンギスカン(原料)」のみ） */
 const isDebugShiodareOrderTarget_ = (rName) => {
   return DEBUG_SHIODARE_TRACK_ENABLED_ && rName === DEBUG_SHIODARE_RAW_NAME_;
 };
