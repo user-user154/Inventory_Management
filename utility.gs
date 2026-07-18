@@ -374,6 +374,7 @@ const getJapaneseWeekday = (dateObj) => {
 
 const HOLIDAY_CALENDAR_ID_ = "ja.japanese#holiday@group.v.calendar.google.com";
 const HOLIDAY_CACHE_FETCH_DAYS_ = 365;
+const HOLIDAY_CACHE_PAST_BUFFER_DAYS_ = 7;
 const HOLIDAY_CACHE_REFRESH_MARGIN_DAYS_ = 30;
 const HOLIDAY_CACHE_PROP_KEY_ = "JP_HOLIDAY_CACHE_V1";
 
@@ -415,7 +416,9 @@ const refreshJapaneseHolidayCache_ = (fetchDays) => {
 
   let rangeStart = new Date();
   rangeStart.setHours(0, 0, 0, 0);
-  let rangeEnd = new Date(rangeStart.getTime());
+  rangeStart.setDate(rangeStart.getDate() - HOLIDAY_CACHE_PAST_BUFFER_DAYS_);
+  let rangeEnd = new Date();
+  rangeEnd.setHours(0, 0, 0, 0);
   rangeEnd.setDate(rangeEnd.getDate() + fetchDays);
 
   let events = cal.getEvents(rangeStart, rangeEnd);
