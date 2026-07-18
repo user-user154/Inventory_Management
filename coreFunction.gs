@@ -882,6 +882,11 @@ const buildConsumptionPrefixSums_ = (precomputed, rawNames) => {
 };
 
 const preWarmHolidayCache_ = (ctx, holidayCache) => {
+  try {
+    ensureJapaneseHolidayCacheFresh_();
+  } catch (e) {
+    Logger.log(`[警告] 祝日キャッシュの更新に失敗、都度取得にフォールバック: ${e.message}`);
+  }
   (ctx.targetDatesStr || []).forEach((dateStr) => {
     isJapanesePublicHolidayCached(new Date(dateStr + "T12:00:00"), holidayCache);
   });

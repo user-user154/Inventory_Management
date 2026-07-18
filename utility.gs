@@ -372,10 +372,100 @@ const getJapaneseWeekday = (dateObj) => {
   return WEEKDAY_JA[new Date(dateObj).getDay()];
 };
 
-/** 祝日カレンダー（日本）— 取得失敗時は祝日配送不可として扱う */
-const isJapanesePublicHoliday = (dateObj) => {
+const HOLIDAY_CALENDAR_ID_ = "ja.japanese#holiday@group.v.calendar.google.com";
+const HOLIDAY_CACHE_FETCH_DAYS_ = 365;
+const HOLIDAY_CACHE_REFRESH_MARGIN_DAYS_ = 30;
+const HOLIDAY_CACHE_PROP_KEY_ = "JP_HOLIDAY_CACHE_V1";
+
+/** 実行内メモ化（PropertiesServiceへの読み取りを1回に抑える） */
+let JAPANESE_HOLIDAY_CACHE_MEMO_ = null;
+
+/** PropertiesServiceの永続キャッシュから祝日集合をロード（無ければnull） */
+const loadJapaneseHolidayCache_ = () => {
+  if (JAPANESE_HOLIDAY_CACHE_MEMO_ !== null) {
+    return JAPANESE_HOLIDAY_CACHE_MEMO_ || null;
+  }
   try {
-    let cal = CalendarApp.getCalendarById("ja.japanese#holiday@group.v.calendar.google.com");
+    let raw = PropertiesService.getScriptProperties().getProperty(HOLIDAY_CACHE_PROP_KEY_);
+    if (!raw) {
+      JAPANESE_HOLIDAY_CACHE_MEMO_ = false;
+      return null;
+    }
+    let parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.dates)) {
+      JAPANESE_HOLIDAY_CACHE_MEMO_ = false;
+      return null;
+    }
+    JAPANESE_HOLIDAY_CACHE_MEMO_ = parsed;
+    return parsed;
+  } catch (e) {
+    JAPANESE_HOLIDAY_CACHE_MEMO_ = false;
+    return null;
+  }
+};
+
+/**
+ * Google公式の日本の祝日カレンダーから指定日数分をまとめて1回で取得し、
+ * PropertiesServiceに保存する（日毎にCalendarAppを呼ぶ従来方式より大幅に高速）
+ */
+const refreshJapaneseHolidayCache_ = (fetchDays) => {
+  fetchDays = fetchDays || HOLIDAY_CACHE_FETCH_DAYS_;
+  let cal = CalendarApp.getCalendarById(HOLIDAY_CALENDAR_ID_);
+  if (!cal) throw new Error("祝日カレンダーを取得できませんでした（カレンダーIDまたはアクセス権を確認してください）");
+
+  let rangeStart = new Date();
+  rangeStart.setHours(0, 0, 0, 0);
+  let rangeEnd = new Date(rangeStart.getTime());
+  rangeEnd.setDate(rangeEnd.getDate() + fetchDays);
+
+  let events = cal.getEvents(rangeStart, rangeEnd);
+  let dateSet = {};
+  events.forEach((ev) => {
+    // 終日イベントは複数日にまたがる場合があるため、開始〜終了(exclusive)を日毎に展開
+    let d = new Date(ev.getAllDayStartDate());
+    let end = new Date(ev.getAllDayEndDate());
+    let guard = 0;
+    while (d.getTime() < end.getTime() && guard < 400) {
+      dateSet[Utilities.formatDate(d, "JST", "yyyy-MM-dd")] = true;
+      d.setDate(d.getDate() + 1);
+      guard++;
+    }
+  });
+
+  let cache = {
+    fetchedAt: new Date().toISOString(),
+    rangeStart: Utilities.formatDate(rangeStart, "JST", "yyyy-MM-dd"),
+    rangeEnd: Utilities.formatDate(rangeEnd, "JST", "yyyy-MM-dd"),
+    dates: Object.keys(dateSet).sort()
+  };
+  PropertiesService.getScriptProperties().setProperty(HOLIDAY_CACHE_PROP_KEY_, JSON.stringify(cache));
+  JAPANESE_HOLIDAY_CACHE_MEMO_ = cache;
+  Logger.log(`[祝日キャッシュ] ${cache.rangeStart}〜${cache.rangeEnd} の${cache.dates.length}件を取得・保存しました`);
+  return cache;
+};
+
+/** キャッシュが無い、または残り有効期間が閾値を切っていれば再取得する */
+const ensureJapaneseHolidayCacheFresh_ = () => {
+  let cache = loadJapaneseHolidayCache_();
+  let todayStr = Utilities.formatDate(new Date(), "JST", "yyyy-MM-dd");
+  let staleThreshold = addDaysToDateStr_(todayStr, HOLIDAY_CACHE_REFRESH_MARGIN_DAYS_);
+  if (!cache || !cache.rangeEnd || cache.rangeEnd < staleThreshold) {
+    return refreshJapaneseHolidayCache_(HOLIDAY_CACHE_FETCH_DAYS_);
+  }
+  return cache;
+};
+
+/** 祝日カレンダー（日本）— 永続キャッシュ優先。範囲外の日付のみ都度CalendarAppへ問い合わせ */
+const isJapanesePublicHoliday = (dateObj) => {
+  let dateStr = Utilities.formatDate(new Date(dateObj), "JST", "yyyy-MM-dd");
+  let cache = loadJapaneseHolidayCache_();
+  if (cache && cache.rangeStart && dateStr >= cache.rangeStart && dateStr <= cache.rangeEnd) {
+    return cache.dates.indexOf(dateStr) !== -1;
+  }
+
+  // キャッシュ範囲外（想定外に遠い未来日など）は低頻度想定で都度取得にフォールバック
+  try {
+    let cal = CalendarApp.getCalendarById(HOLIDAY_CALENDAR_ID_);
     if (!cal) return false;
     let d = new Date(dateObj);
     d.setHours(12, 0, 0, 0);
