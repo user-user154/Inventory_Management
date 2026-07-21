@@ -249,6 +249,16 @@ const resolveCanonicalName_ = (name, unifyMap) => {
   return n;
 };
 
+/** 原材料マスタに無くても許容する棚卸し品目（停止済み・賄い専用など、発注計算に使わないため） */
+const STOCK_TAKING_MASTER_MISMATCH_ALLOWED_ = {
+  "和牛ブリスケ(原料)": true,
+  "賄い鶏もも": true,
+  "にんにくホイル焼き": true,
+  "サラダ油": true,
+  "タンスパイス": true,
+  "カレー": true
+};
+
 /** 棚卸し名寄せ後にマスタへ無い名称を警告 */
 const logNameUnifyWarnings_ = (stockData, rawMaster, prepRecipes, unifyMap) => {
   if (!stockData) return;
@@ -259,7 +269,7 @@ const logNameUnifyWarnings_ = (stockData, rawMaster, prepRecipes, unifyMap) => {
   }
 
   Object.keys(stockData.rawStock || {}).forEach((name) => {
-    if (!rawMaster[name]) {
+    if (!rawMaster[name] && !STOCK_TAKING_MASTER_MISMATCH_ALLOWED_[name]) {
       Logger.log(`[警告] 棚卸し(名寄せ後・原材料)が原材料マスタに無い: ${name}`);
     }
   });
