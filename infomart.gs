@@ -4,18 +4,20 @@
  * 目的: 請求書データ・受発注/納品データを店舗ごとに取得し、可視化用のログシートへ書き込む。
  * 発注データの送信（フェーズ2）は社内承認待ちのため本ファイルでは未実装（末尾の拡張ポイント参照）。
  *
- * 店舗ごとにインフォマートのアカウント（ログインID/パスワード・client_id/secret）が異なるため、
+ * 店舗ごとにインフォマートのログインアカウント（user_id/user_password）が異なる一方、
+ * client_id/client_secret はAPI利用申請時に会社単位で発行される想定のため全店舗共通。
  * 対象店舗の選択はスマレジ連携と共用で「予算・実績」シート D1（SMAREGI_STORE_DROPDOWN_CELL_、
  * smaregi.gs参照）のプルダウンをそのまま使う。D1は "storeId: storeName" 形式なので、
- * storeName部分をキーにしてスクリプトプロパティ INFOMART_STORE_CREDENTIALS（店舗名→資格情報の
- * JSONマップ）から該当店舗の資格情報を引く。D1の店舗名とこのJSONのキーが一致している必要がある。
+ * storeName部分をキーにしてスクリプトプロパティ INFOMART_STORE_CREDENTIALS（店舗名→
+ * {user_id,user_password} のJSONマップ）から該当店舗のログイン情報を引く。
+ * D1の店舗名とこのJSONのキーが一致している必要がある。
  *
  * 事前準備（このファイルのコードだけでは完結しない）:
- * 1. Apps Script エディタ → プロジェクトの設定 → スクリプトプロパティに
- *    INFOMART_STORE_CREDENTIALS を次の形式のJSON文字列で設定（値はコードに書かない）:
- *    {"渋谷店": {"user_id":"...","user_password":"...","client_id":"...","client_secret":"..."},
- *     "新宿店": {...}}
- *    キーの店舗名は「予算・実績」D1に表示される店舗名（スマレジの店舗名）と一致させること。
+ * 1. Apps Script エディタ → プロジェクトの設定 → スクリプトプロパティに以下を設定（値はコードに書かない）:
+ *    - INFOMART_CLIENT_ID / INFOMART_CLIENT_SECRET: 全店舗共通のクライアントID/シークレット
+ *    - INFOMART_STORE_CREDENTIALS: 店舗名→ログイン情報のJSON文字列。例:
+ *      {"渋谷店": {"user_id":"...","user_password":"..."}, "新宿店": {"user_id":"...","user_password":"..."}}
+ *      キーの店舗名は「予算・実績」D1に表示される店舗名（スマレジの店舗名）と一致させること。
  * 2. メニュー「発注管理」→「スマレジ店舗一覧を更新」でD1の選択肢を用意し、対象店舗を選択
  * 3. constants.gs の INFOMART_CONFIG.useTestEnv でテスト環境/本番環境を切り替える
  * 4. メニュー「発注管理」→ 各診断メニュー、または test.js の runDiagnoseInfomart* を
@@ -42,13 +44,27 @@ const INFOMART_ORDER_DELIVERY_LOG_HEADERS_ = [
   "納品予定日", "取引先名", "ステータス"
 ];
 
-/** 店舗ごとの資格情報をまとめて持つスクリプトプロパティ（店舗名→{user_id,user_password,client_id,client_secret}） */
+/** 店舗ごとのログイン情報（user_id/user_password）をまとめて持つスクリプトプロパティ（店舗名→{user_id,user_password}） */
 const INFOMART_STORE_CREDENTIALS_PROP_ = "INFOMART_STORE_CREDENTIALS";
 
 /** タイムアウトしたバッチジョブのIDを店舗ごとに一時保存するスクリプトプロパティのプレフィックス（次回実行時の再確認用） */
 const INFOMART_ORDER_LAST_BATCH_ID_PROP_PREFIX_ = "INFOMART_ORDER_LAST_BATCH_ID_";
 
-/** スクリプトプロパティから店舗別資格情報マップを読む（未設定・不正JSONならエラー） */
+/** スクリプトプロパティから全店舗共通のクライアントID/シークレットを読む（未設定ならエラー） */
+const getInfomartClientCredentials_ = () => {
+  let props = PropertiesService.getScriptProperties();
+  let clientId = props.getProperty("INFOMART_CLIENT_ID");
+  let clientSecret = props.getProperty("INFOMART_CLIENT_SECRET");
+  if (!clientId || !clientSecret) {
+    throw new Error(
+      "スクリプトプロパティに INFOMART_CLIENT_ID / INFOMART_CLIENT_SECRET が設定されていません。"
+      + "プロジェクトの設定 → スクリプトプロパティ から登録してください。"
+    );
+  }
+  return { clientId: clientId, clientSecret: clientSecret };
+};
+
+/** スクリプトプロパティから店舗別ログイン情報マップを読む（未設定・不正JSONならエラー） */
 const getInfomartStoreCredentialsMap_ = () => {
   let raw = PropertiesService.getScriptProperties().getProperty(INFOMART_STORE_CREDENTIALS_PROP_);
   if (!raw) {
@@ -66,17 +82,17 @@ const getInfomartStoreCredentialsMap_ = () => {
   return map;
 };
 
-/** 指定店舗名の資格情報を取得（マップに無ければ登録済み店舗名一覧を添えてエラー） */
+/** 指定店舗名のログイン情報を取得（マップに無ければ登録済み店舗名一覧を添えてエラー） */
 const getInfomartCredentialsForStore_ = (storeName) => {
   let map = getInfomartStoreCredentialsMap_();
   let cred = map[storeName];
   if (!cred) {
     throw new Error(
-      `${INFOMART_STORE_CREDENTIALS_PROP_} に店舗「${storeName}」の資格情報が見つかりません。`
+      `${INFOMART_STORE_CREDENTIALS_PROP_} に店舗「${storeName}」のログイン情報が見つかりません。`
       + `登録済み店舗: ${Object.keys(map).join(", ") || "(なし)"}`
     );
   }
-  let missing = ["user_id", "user_password", "client_id", "client_secret"].filter((k) => { return !cred[k]; });
+  let missing = ["user_id", "user_password"].filter((k) => { return !cred[k]; });
   if (missing.length > 0) {
     throw new Error(`${INFOMART_STORE_CREDENTIALS_PROP_} の店舗「${storeName}」に ${missing.join(" / ")} が不足しています。`);
   }
@@ -108,6 +124,7 @@ const getInfomartAccessToken_ = (storeName) => {
   if (cached) return cached;
 
   let cred = getInfomartCredentialsForStore_(storeName);
+  let clientCred = getInfomartClientCredentials_();
   let authBase = INFOMART_CONFIG.useTestEnv ? INFOMART_CONFIG.authBaseTest : INFOMART_CONFIG.authBaseProd;
   let tokenUrl = `${authBase}/api/credentials/access_token`;
 
@@ -117,8 +134,8 @@ const getInfomartAccessToken_ = (storeName) => {
     payload: {
       user_id: cred.user_id,
       user_password: cred.user_password,
-      client_id: cred.client_id,
-      client_secret: cred.client_secret,
+      client_id: clientCred.clientId,
+      client_secret: clientCred.clientSecret,
       realm: INFOMART_CONFIG.realm,
       response_type: "json"
     },
