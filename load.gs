@@ -152,10 +152,15 @@ const loadYieldMaster = (sheet, unifyMap) => {
   return map;
 };
 
+/** 中間レシピ表に無くても許容する歩留まりマスタの品目（手動発注のため仕込み計算対象外） */
+const YIELD_MASTER_MISMATCH_ALLOWED_ = {
+  "生ビール": true
+};
+
 /** 歩留まりマスタの商品名が中間レシピ表に存在するか確認 */
 const logYieldMasterWarnings_ = (yieldMap, prepRecipes) => {
   Object.keys(yieldMap || {}).forEach((name) => {
-    if (!prepRecipes[name]) {
+    if (!prepRecipes[name] && !YIELD_MASTER_MISMATCH_ALLOWED_[name]) {
       Logger.log(`[警告] 歩留まりマスタの商品名が中間レシピ表に無い: ${name}`);
     }
   });
