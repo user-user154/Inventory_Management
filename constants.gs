@@ -35,8 +35,8 @@ const SMAREGI_CONFIG = {
 };
 
 /** インフォマート BtoBプラットフォームAPI 接続先（契約情報はシークレットではないためここに置く。
- *  ユーザーID/パスワード・クライアントID/シークレットはスクリプトプロパティ
- *  INFOMART_USER_ID / INFOMART_USER_PASSWORD / INFOMART_CLIENT_ID / INFOMART_CLIENT_SECRET） */
+ *  店舗ごとのユーザーID/パスワード・クライアントID/シークレットはスクリプトプロパティ
+ *  INFOMART_STORE_CREDENTIALS に店舗名→資格情報のJSONマップとして格納する。詳細はinfomart.gs参照） */
 const INFOMART_CONFIG = {
   authBaseProd: "https://auth.infomart.co.jp",
   authBaseTest: "http://authtest.infomart.co.jp",
