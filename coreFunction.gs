@@ -375,7 +375,7 @@ const executeCoreSimulation = (ctx) => {
     ? clampDayIndex_(getOrderSheetDayIndex(ctx.orderDate, ctx.periodMode || "当日", ctx.targetDate), ctx.simDays)
     : 0;
   let orderBa = getBA(ctx.budgetActualData, new Date(orderDateStr));
-  let orderSalesBase = resolveDailySalesBase_(orderBa, ctx.salesBiasCoefficient);
+  let orderSalesBase = resolveDailySalesBase_(orderBa);
   let orderBase = orderSalesBase.amount;
   let orderDay = simulationResults[orderIdx] || { inProcess: {} };
   Logger.log(`[sim] 期間=${ctx.periodMode || "当日"} 範囲=${ctx.targetDatesStr[0]}〜${ctx.targetDatesStr[ctx.simDays - 1]} 指示書日=${orderDateStr} 売上=${orderBase} 仕込み品数=${Object.keys(orderDay.inProcess || {}).length}`);
@@ -657,6 +657,76 @@ const scaleDemandMap_ = (src, factor) => {
   return out;
 };
 
+/** src(売上1円あたり単価) × factor に、品目ごとのバイアス係数(itemBias)を掛けて合算する */
+const scaleDemandMapWithItemBias_ = (src, factor, itemBias) => {
+  let out = {};
+  if (!factor) return out;
+  Object.keys(src).forEach((k) => {
+    let coef = (itemBias && itemBias[k] != null) ? itemBias[k] : 1;
+    let scaled = src[k] * factor * coef;
+    if (scaled > 0) out[k] = scaled;
+  });
+  return out;
+};
+
+/** バイアス係数の集計から除外するレシピ備考（大量にありレシピ構成上影響が薄いドリンク・その他） */
+const BIAS_EXCLUDED_RECIPE_NOTES_ = { "その他": true, "ドリンク": true };
+const isRecipeExcludedFromBiasCalc_ = (recipe) => {
+  return !!(recipe && BIAS_EXCLUDED_RECIPE_NOTES_[recipe.note]);
+};
+
+const accumulateItemRatios_ = (ratiosByItem, predictedMap, actualMap) => {
+  Object.keys(predictedMap).forEach((item) => {
+    let predicted = predictedMap[item];
+    if (!(predicted > 0)) return;
+    let actual = (actualMap && actualMap[item]) || 0;
+    if (!ratiosByItem[item]) ratiosByItem[item] = [];
+    ratiosByItem[item].push(actual / predicted);
+  });
+};
+
+/**
+ * 商品(仕込み品・原材料)ごとのバイアス補正係数
+ * 実績出数ログがある過去日について「レシピ構成比(unit) × その日の実売上」の予測需要と、
+ * 実際の出数展開結果を比較し、品目ごとに実績/予測比の中央値を算出する。
+ * レシピ備考が「その他」「ドリンク」の商品(行)は集計対象から除外し計算量を抑える。
+ */
+const calcItemSalesBiasCoefficients_ = (ctx, unit) => {
+  let ratiosByItem = {};
+  if (!ctx.targetDatesStr || !ctx.actualSalesLogData || !ctx.budgetActualData) return {};
+
+  let cursor = ctx.targetDatesStr[0];
+  let daysUsed = 0;
+  for (let i = 0; i < SALES_BIAS_LOOKBACK_DAYS_ * 2 && daysUsed < SALES_BIAS_LOOKBACK_DAYS_; i++) {
+    cursor = addDaysToDateStr_(cursor, -1);
+    let actualRows = ctx.actualSalesLogData[cursor];
+    let ba = ctx.budgetActualData[cursor];
+    if (!actualRows || actualRows.length === 0 || !ba || !ba.hasActual || !(Number(ba.actual) > 0)) continue;
+
+    let filteredRows = actualRows.filter((row) => {
+      return !isRecipeExcludedFromBiasCalc_(ctx.recipeMaster[row.menuName]);
+    });
+    let actualExpanded = expandActualDayDemands_(ctx, filteredRows);
+    let actualSalesAmount = Number(ba.actual);
+
+    accumulateItemRatios_(ratiosByItem, scaleDemandMap_(unit.prepDemand, actualSalesAmount), actualExpanded.prepDemand);
+    accumulateItemRatios_(ratiosByItem, scaleDemandMap_(unit.directRawDemand, actualSalesAmount), actualExpanded.directRawDemand);
+    daysUsed++;
+  }
+
+  let coefficients = {};
+  Object.keys(ratiosByItem).forEach((item) => {
+    let ratios = ratiosByItem[item];
+    if (ratios.length < SALES_BIAS_MIN_SAMPLES_) return;
+    ratios.sort((a, b) => a - b);
+    let mid = Math.floor(ratios.length / 2);
+    let median = ratios.length % 2 === 0 ? (ratios[mid - 1] + ratios[mid]) / 2 : ratios[mid];
+    coefficients[item] = Math.min(SALES_BIAS_CLAMP_MAX_, Math.max(SALES_BIAS_CLAMP_MIN_, median));
+  });
+  Logger.log(`[需要予測] 商品別バイアス係数を${Object.keys(coefficients).length}品目分算出（対象実績日=${daysUsed}日）`);
+  return coefficients;
+};
+
 /** 売上1円あたりのメニュー需要（POS×レシピ展開）を1回だけ計算 */
 const computeUnitMenuDemands_ = (ctx) => {
   let prepDemand = {};
@@ -775,6 +845,7 @@ const buildDemandCache_ = (ctx) => {
   let unitPrepWasteRaw = precomputeUnitPrepWasteRaw_(ctx);
   ctx._unitPrepYieldLossRaw = unitPrepYieldLossRaw;
   ctx._unitPrepWasteRaw = unitPrepWasteRaw;
+  ctx._itemSalesBiasCoefficients = calcItemSalesBiasCoefficients_(ctx, unitMenuDemands);
   let days = precomputeDailyDemands(
     ctx, unitMenuDemands, unitCostRawDemand, unitPrepYieldLossRaw, unitPrepWasteRaw
   );
@@ -798,26 +869,27 @@ const precomputeDailyDemands = (ctx, unitMenuDemands, unitCostRawDemand, unitPre
 
   for (let d = 0; d < ctx.simDays; d++) {
     let dateStr = ctx.targetDatesStr[d];
-    let salesBase = resolveDailySalesBase_(ctx.budgetActualData[dateStr], ctx.salesBiasCoefficient);
+    let salesBase = resolveDailySalesBase_(ctx.budgetActualData[dateStr]);
     let factor = salesBase.amount || 0;
     let lookaheadAmount = resolveNextDayPrepLookaheadAmount_(ctx, d);
     let actualRows = ctx.actualSalesLogData && ctx.actualSalesLogData[dateStr];
     let usedActual = actualRows && actualRows.length > 0;
 
+    let itemBias = ctx._itemSalesBiasCoefficients;
     let prepDemand, directRawDemand, menuRawDemand;
     if (usedActual) {
       // 実績出数がある日（今日を含む過去日）は比率予測ではなく実際の商品別出数をそのまま展開する
       let actualExpanded = expandActualDayDemands_(ctx, actualRows);
-      let lookaheadPrepDemand = stripExcludedLookaheadItems_(scaleDemandMap_(unit.prepDemand, lookaheadAmount));
+      let lookaheadPrepDemand = stripExcludedLookaheadItems_(scaleDemandMapWithItemBias_(unit.prepDemand, lookaheadAmount, itemBias));
       prepDemand = mergeRawDemandMaps_(actualExpanded.prepDemand, lookaheadPrepDemand);
       directRawDemand = actualExpanded.directRawDemand;
       menuRawDemand = finalizeCostRawDemandFromScaled_(
         ctx, actualExpanded.prepDemand, actualExpanded.directRawDemand, { skipYield: true }
       );
     } else {
-      let lookaheadPrepDemand = stripExcludedLookaheadItems_(scaleDemandMap_(unit.prepDemand, lookaheadAmount));
-      prepDemand = mergeRawDemandMaps_(scaleDemandMap_(unit.prepDemand, factor), lookaheadPrepDemand);
-      directRawDemand = scaleDemandMap_(unit.directRawDemand, factor);
+      let lookaheadPrepDemand = stripExcludedLookaheadItems_(scaleDemandMapWithItemBias_(unit.prepDemand, lookaheadAmount, itemBias));
+      prepDemand = mergeRawDemandMaps_(scaleDemandMapWithItemBias_(unit.prepDemand, factor, itemBias), lookaheadPrepDemand);
+      directRawDemand = scaleDemandMapWithItemBias_(unit.directRawDemand, factor, itemBias);
       menuRawDemand = factor > 0 ? scaleDemandMap_(unitCostRaw, factor) : {};
     }
 

@@ -42,13 +42,11 @@ const buildSimulationContext = (simStartDate, simDays, periodMode, orderDate, op
     targetDatesStr.push(formatJstDate_(d));
   }
 
-  // バイアス係数の遡り参照(SALES_BIAS_LOOKBACK_DAYS_の2倍まで)が前月にまたがっても
+  // 商品別バイアス係数の遡り参照(SALES_BIAS_LOOKBACK_DAYS_の2倍まで)が前月にまたがっても
   // 対象月として読み込まれるよう、遡り境界日もキー一覧に含める
   let biasLookbackAnchorStr = addDaysToDateStr_(targetDatesStr[0], -(SALES_BIAS_LOOKBACK_DAYS_ * 2));
   let budgetLoadDateKeys = targetDatesStr.concat([biasLookbackAnchorStr]);
   let budgetActualData = loadBudgetAndActualData(budgetSheet, budgetAnchor, budgetLoadDateKeys);
-  let salesBiasCoefficient = calcSalesBiasCoefficient_(budgetActualData, targetDatesStr[0]);
-  Logger.log(`[需要予測] 売上バイアス補正係数=${salesBiasCoefficient.toFixed(3)}`);
   let vendorData = options.vendorData || loadSTVendorCalendar(vendorSheet);
   let yieldMap = loadYieldMaster(yieldSheet, nameUnifyMap);
   logYieldMasterWarnings_(yieldMap, prepRecipes);
@@ -97,7 +95,6 @@ const buildSimulationContext = (simStartDate, simDays, periodMode, orderDate, op
     stockObj: stockData.rawStock,
     prepStockObj: stockData.prepStock,
     budgetActualData: budgetActualData,
-    salesBiasCoefficient: salesBiasCoefficient,
     vendorCalendars: vendorData.calendars,
     vendorOrder: vendorData.order,
     posCleanData: posCleanData,
@@ -543,12 +540,14 @@ const loadRecipeMaster = (sheet, unifyMap) => {
   if (!meta) return map;
 
   let idxName = meta.headers.indexOf("統一商品名");
+  let idxNote = findColumnIndex_(meta.headers, ["備考"], -1);
 
   for (let i = meta.dataStartRow; i < meta.fullData.length; i++) {
     let name = String(meta.fullData[i][idxName]).trim();
     if (!name) continue;
 
     map[name] = {
+      note: idxNote !== -1 ? String(meta.fullData[i][idxNote]).trim() : "",
       ingredients: loadIngredientRows_(meta.headers, meta.fullData[i], 6, unifyMap, false)
     };
   }
