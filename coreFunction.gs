@@ -375,7 +375,7 @@ const executeCoreSimulation = (ctx) => {
     ? clampDayIndex_(getOrderSheetDayIndex(ctx.orderDate, ctx.periodMode || "当日", ctx.targetDate), ctx.simDays)
     : 0;
   let orderBa = getBA(ctx.budgetActualData, new Date(orderDateStr));
-  let orderSalesBase = resolveDailySalesBase_(orderBa);
+  let orderSalesBase = resolveDailySalesBase_(orderBa, ctx.salesBiasCoefficient);
   let orderBase = orderSalesBase.amount;
   let orderDay = simulationResults[orderIdx] || { inProcess: {} };
   Logger.log(`[sim] 期間=${ctx.periodMode || "当日"} 範囲=${ctx.targetDatesStr[0]}〜${ctx.targetDatesStr[ctx.simDays - 1]} 指示書日=${orderDateStr} 売上=${orderBase} 仕込み品数=${Object.keys(orderDay.inProcess || {}).length}`);
@@ -798,7 +798,7 @@ const precomputeDailyDemands = (ctx, unitMenuDemands, unitCostRawDemand, unitPre
 
   for (let d = 0; d < ctx.simDays; d++) {
     let dateStr = ctx.targetDatesStr[d];
-    let salesBase = resolveDailySalesBase_(ctx.budgetActualData[dateStr]);
+    let salesBase = resolveDailySalesBase_(ctx.budgetActualData[dateStr], ctx.salesBiasCoefficient);
     let factor = salesBase.amount || 0;
     let lookaheadAmount = resolveNextDayPrepLookaheadAmount_(ctx, d);
     let actualRows = ctx.actualSalesLogData && ctx.actualSalesLogData[dateStr];
