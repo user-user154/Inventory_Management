@@ -43,5 +43,5 @@ const INFOMART_CONFIG = {
   apiBase: "https://api.infomart.co.jp",
   invoiceApiBase: "https://api.infomart.co.jp", // TODO: 請求書APIの実際のホストを本番疎通確認時に確認・修正する
   realm: "/api",
-  useTestEnv: true // 本番資格情報での動作確認が済んだら false へ切り替える
+  useTestEnv: false // テスト環境の資格情報が入手できないため本番環境を使用（本番でのAPI呼び出しには注意）
 };
