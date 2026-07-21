@@ -18,7 +18,9 @@ const SHEET_NAMES = {
   FORECAST_DEMAND_LOG: "予測出数ログ",
   NAME_UNIFY_MASTER: "名寄せマスタ",
   YIELD_MASTER: "歩留まりマスタ",
-  ACTUAL_SALES_LOG: "実績出数ログ"
+  ACTUAL_SALES_LOG: "実績出数ログ",
+  INFOMART_INVOICE_LOG: "Infomart請求書ログ",
+  INFOMART_ORDER_DELIVERY_LOG: "Infomart受発注ログ"
 };
 
 const SALES_TAX_RATE = 0.10;
@@ -30,4 +32,16 @@ const SMAREGI_CONFIG = {
   contractId: "spy565k6",
   idBase: "https://id.smaregi.jp",
   apiBase: "https://api.smaregi.jp"
+};
+
+/** インフォマート BtoBプラットフォームAPI 接続先（契約情報はシークレットではないためここに置く。
+ *  ユーザーID/パスワード・クライアントID/シークレットはスクリプトプロパティ
+ *  INFOMART_USER_ID / INFOMART_USER_PASSWORD / INFOMART_CLIENT_ID / INFOMART_CLIENT_SECRET） */
+const INFOMART_CONFIG = {
+  authBaseProd: "https://auth.infomart.co.jp",
+  authBaseTest: "http://authtest.infomart.co.jp",
+  apiBase: "https://api.infomart.co.jp",
+  invoiceApiBase: "https://api.infomart.co.jp", // TODO: 請求書APIの実際のホストを本番疎通確認時に確認・修正する
+  realm: "/api",
+  useTestEnv: true // 本番資格情報での動作確認が済んだら false へ切り替える
 };
