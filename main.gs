@@ -18,6 +18,7 @@ function onOpen() {
     .addItem("実績取得→翌日の仕込み・発注計算を今すぐ実行", "runDailyPosImportAndPlanNextDay")
     .addItem("スマレジ日次自動取得トリガーを設定", "setupSmaregiDailyTrigger")
     .addSeparator()
+    .addItem("Infomart認可URLを発行（予算・実績 D1で選択中の店舗）", "promptInfomartAuthorizationUrl")
     .addItem("Infomart請求書を取得（当日分）", "runInfomartInvoiceImportToday")
     .addItem("Infomart請求書を取得（日付指定）", "promptAndImportInfomartInvoices")
     .addItem("Infomart受発注データを取得（日付範囲指定）", "promptAndImportInfomartOrderDelivery")

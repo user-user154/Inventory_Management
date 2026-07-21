@@ -4,30 +4,43 @@
  * 目的: 請求書データ・受発注/納品データを店舗ごとに取得し、可視化用のログシートへ書き込む。
  * 発注データの送信（フェーズ2）は社内承認待ちのため本ファイルでは未実装（末尾の拡張ポイント参照）。
  *
- * 店舗ごとにインフォマートのログインアカウント（user_id/user_password）が異なる一方、
- * client_id/client_secret はAPI利用申請時に会社単位で発行される想定のため全店舗共通。
- * 対象店舗の選択はスマレジ連携と共用で「予算・実績」シート D1（SMAREGI_STORE_DROPDOWN_CELL_、
- * smaregi.gs参照）のプルダウンをそのまま使う。D1は "storeId: storeName" 形式なので、
- * storeName部分をキーにしてスクリプトプロパティ INFOMART_STORE_CREDENTIALS（店舗名→
- * {user_id,user_password} のJSONマップ）から該当店舗のログイン情報を引く。
- * D1の店舗名とこのJSONのキーが一致している必要がある。
+ * 認証方式について: インフォマート公式の「OAuth2.0 認証手順」PDFで確認したところ、
+ * 存在するのは①ブラウザでPFID（ログインID）・パスワードを直接入力する「認可コードフロー」と、
+ * ②その結果得られるリフレッシュトークンでアクセストークンを再発行する方式の2つのみ。
+ * user_id/user_passwordを直接POSTする「クレデンシャルズフロー」は存在しない（過去にそれで
+ * 実装し401エラーになったため、正式な認可コードフローに作り直した経緯がある）。
+ * そのため「ログインID・パスワードをこのシステムが保存する」ことは無く、店舗ごとに一度だけ
+ * ブラウザで認可し、以後はリフレッシュトークン（使うたびにローテーションする）で運用する。
+ *
+ * 店舗ごとに異なるのはこのリフレッシュトークンのみで、client_id/client_secret はAPI利用申請時に
+ * 会社単位で発行される想定のため全店舗共通。対象店舗の選択はスマレジ連携と共用で「予算・実績」
+ * シート D1（SMAREGI_STORE_DROPDOWN_CELL_、smaregi.gs参照）のプルダウンをそのまま使う。
  *
  * 事前準備（このファイルのコードだけでは完結しない）:
  * 1. Apps Script エディタ → プロジェクトの設定 → スクリプトプロパティに以下を設定（値はコードに書かない）:
  *    - INFOMART_CLIENT_ID / INFOMART_CLIENT_SECRET: 全店舗共通のクライアントID/シークレット
- *    - INFOMART_STORE_CREDENTIALS: 店舗名→ログイン情報のJSON文字列。例:
- *      {"渋谷店": {"user_id":"...","user_password":"..."}, "新宿店": {"user_id":"...","user_password":"..."}}
- *      キーの店舗名は「予算・実績」D1に表示される店舗名（スマレジの店舗名）と一致させること。
- * 2. メニュー「発注管理」→「スマレジ店舗一覧を更新」でD1の選択肢を用意し、対象店舗を選択
- * 3. constants.gs の INFOMART_CONFIG.useTestEnv でテスト環境/本番環境を切り替える
- * 4. メニュー「発注管理」→ 各診断メニュー、または test.js の runDiagnoseInfomart* を
- *    Apps Script エディタから実行し、実データの形状を確認してから本番運用に入る
+ *    - INFOMART_REDIRECT_URI: 下記2で発行するWebアプリのURL（.../exec）
+ *    - INFOMART_REFRESH_TOKENS: 店舗ごとの認可完了後、doGet()が自動で書き込む
+ *      （店舗名→リフレッシュトークンのJSONマップ。手動で用意する必要はない）
+ * 2. Apps Script エディタ →「デプロイ」→「新しいデプロイ」→ 種類「ウェブアプリ」、
+ *    実行ユーザー「自分」、アクセスできるユーザー「全員」でデプロイし、発行されたURLを
+ *    INFOMART_REDIRECT_URI に設定する（clasp push だけではこのURLは変わらない）。
+ * 3. そのURLを、インフォマートの契約担当窓口・API申請の担当者に連絡し、
+ *    コールバックURL（redirect_uri）として登録してもらう（未登録の場合は新規登録依頼が必要）。
+ * 4. メニュー「発注管理」→「スマレジ店舗一覧を更新」でD1の選択肢を用意し、対象店舗を選択
+ * 5. メニュー「発注管理」→「Infomart認可URLを発行」を実行し、表示されたリンクをクリックして
+ *    その店舗のPFID・パスワードでログイン（店舗ごとに一度だけ必要）
+ * 6. constants.gs の INFOMART_CONFIG.useTestEnv でテスト環境/本番環境を切り替える
+ * 7. test.js の runDiagnoseInfomart* を Apps Script エディタから実行し、
+ *    実データの形状を確認してから本番運用に入る
  *
  * 既知の未確認事項（初回の本番呼び出し前に要確認。詳細はプラン参照）:
  * - 請求書APIの実ホスト（INFOMART_CONFIG.invoiceApiBase の TODO）
  * - 受発注 /check・/get の正確なリクエスト/レスポンス形状
  * - target_date_set（0〜7）の各値が指す日付項目の意味
  * - 非同期ジョブの実際の完了時間（ポーリング間隔・上限回数の妥当性）
+ * - リフレッシュトークンの有効期限は31日。使うたびに新しいものへローテーションされるため、
+ *   最低でも月1回はいずれかのAPIを呼び出す運用にしておかないと知らないうちに失効しうる
  *
  * インフォマートAPI共通仕様の注意点: クエリ文字列・ボディ情報中の
  * % ^ * ( ) [ ] < > ' " タブ カンマ は送信時に自動で除去される。
@@ -44,11 +57,14 @@ const INFOMART_ORDER_DELIVERY_LOG_HEADERS_ = [
   "納品予定日", "取引先名", "ステータス"
 ];
 
-/** 店舗ごとのログイン情報（user_id/user_password）をまとめて持つスクリプトプロパティ（店舗名→{user_id,user_password}） */
-const INFOMART_STORE_CREDENTIALS_PROP_ = "INFOMART_STORE_CREDENTIALS";
+/** 店舗ごとのリフレッシュトークンをまとめて持つスクリプトプロパティ（店舗名→リフレッシュトークン文字列） */
+const INFOMART_REFRESH_TOKENS_PROP_ = "INFOMART_REFRESH_TOKENS";
 
 /** タイムアウトしたバッチジョブのIDを店舗ごとに一時保存するスクリプトプロパティのプレフィックス（次回実行時の再確認用） */
 const INFOMART_ORDER_LAST_BATCH_ID_PROP_PREFIX_ = "INFOMART_ORDER_LAST_BATCH_ID_";
+
+/** OAuth2.0で要求する固定スコープ（インフォマートAPIを利用する場合は固定値） */
+const INFOMART_OAUTH_SCOPE_ = "openid profile email qualified";
 
 /** スクリプトプロパティから全店舗共通のクライアントID/シークレットを読む（未設定ならエラー） */
 const getInfomartClientCredentials_ = () => {
@@ -64,58 +80,152 @@ const getInfomartClientCredentials_ = () => {
   return { clientId: clientId, clientSecret: clientSecret };
 };
 
-/** スクリプトプロパティから店舗別ログイン情報マップを読む（未設定・不正JSONならエラー） */
-const getInfomartStoreCredentialsMap_ = () => {
-  let raw = PropertiesService.getScriptProperties().getProperty(INFOMART_STORE_CREDENTIALS_PROP_);
-  if (!raw) {
+/** スクリプトプロパティから認可コールバックURル（Webアプリのデプロイ先）を読む（未設定ならエラー） */
+const getInfomartRedirectUri_ = () => {
+  let uri = PropertiesService.getScriptProperties().getProperty("INFOMART_REDIRECT_URI");
+  if (!uri) {
     throw new Error(
-      `スクリプトプロパティに ${INFOMART_STORE_CREDENTIALS_PROP_} が設定されていません。`
-      + "プロジェクトの設定 → スクリプトプロパティ から、店舗名をキーにしたJSONを登録してください。"
+      "スクリプトプロパティに INFOMART_REDIRECT_URI が設定されていません。"
+      + "このプロジェクトをウェブアプリとしてデプロイし、発行されたURLを登録してください。"
     );
   }
-  let map;
-  try {
-    map = JSON.parse(raw);
-  } catch (err) {
-    throw new Error(`${INFOMART_STORE_CREDENTIALS_PROP_} のJSON形式が不正です: ${err.message}`);
-  }
-  return map;
+  return uri;
 };
 
-/** 指定店舗名のログイン情報を取得（マップに無ければ登録済み店舗名一覧を添えてエラー） */
-const getInfomartCredentialsForStore_ = (storeName) => {
-  let map = getInfomartStoreCredentialsMap_();
-  let cred = map[storeName];
-  if (!cred) {
+/** スクリプトプロパティから店舗別リフレッシュトークンマップを読む（未設定なら空マップ扱い） */
+const getInfomartRefreshTokenMap_ = () => {
+  let raw = PropertiesService.getScriptProperties().getProperty(INFOMART_REFRESH_TOKENS_PROP_);
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`${INFOMART_REFRESH_TOKENS_PROP_} のJSON形式が不正です: ${err.message}`);
+  }
+};
+
+/** 指定店舗のリフレッシュトークンを取得（未認可ならメニューでの認可を促すエラー） */
+const getInfomartRefreshTokenForStore_ = (storeName) => {
+  let map = getInfomartRefreshTokenMap_();
+  let token = map[storeName];
+  if (!token) {
     throw new Error(
-      `${INFOMART_STORE_CREDENTIALS_PROP_} に店舗「${storeName}」のログイン情報が見つかりません。`
-      + `登録済み店舗: ${Object.keys(map).join(", ") || "(なし)"}`
+      `店舗「${storeName}」はまだインフォマートAPIの認可が完了していません。`
+      + "メニュー「発注管理」→「Infomart認可URLを発行」から認可を行ってください。"
     );
   }
-  let missing = ["user_id", "user_password"].filter((k) => { return !cred[k]; });
-  if (missing.length > 0) {
-    throw new Error(`${INFOMART_STORE_CREDENTIALS_PROP_} の店舗「${storeName}」に ${missing.join(" / ")} が不足しています。`);
-  }
-  return cred;
+  return token;
+};
+
+/** 指定店舗のリフレッシュトークンを保存（ローテーション対応。認可時・再発行時どちらでも呼ぶ） */
+const setInfomartRefreshTokenForStore_ = (storeName, refreshToken) => {
+  let map = getInfomartRefreshTokenMap_();
+  map[storeName] = refreshToken;
+  PropertiesService.getScriptProperties().setProperty(INFOMART_REFRESH_TOKENS_PROP_, JSON.stringify(map));
 };
 
 /**
  * 「予算・実績」D1（スマレジ店舗選択と共用、smaregi.gsのparseSmaregiStoreCellValue_で解析）から
- * 対象店舗名を解決する。D1が未選択、またはその店舗名がINFOMART_STORE_CREDENTIALSに
- * 登録されていない場合はエラー。
+ * 対象店舗名を解決する。D1が未選択、またはその店舗がまだ認可されていない場合はエラー。
  */
 const resolveSelectedInfomartStoreName_ = (budgetSheet) => {
   let store = resolveSelectedSmaregiStore_(budgetSheet);
-  // 資格情報の有無を先に検証しておく（存在しない店舗名でトークン取得に進んでしまうのを防ぐ）
-  getInfomartCredentialsForStore_(store.storeName);
+  // 認可済みかどうかを先に検証しておく（未認可の店舗名でトークン取得に進んでしまうのを防ぐ）
+  getInfomartRefreshTokenForStore_(store.storeName);
   return store.storeName;
 };
 
+const infomartAuthBase_ = () => {
+  return INFOMART_CONFIG.useTestEnv ? INFOMART_CONFIG.authBaseTest : INFOMART_CONFIG.authBaseProd;
+};
+
 /**
- * OAuth2.0 クレデンシャルズフローで店舗別のアクセストークンを取得（有効期限-60秒でキャッシュ）
- * refresh_token は使わず、失効直前に毎回取り直す方式にする
- * （インフォマート公式資料がバッチ用途としてクレデンシャルズフローを推奨しており、
- *  有効期限も300秒と短いため、リフレッシュローテーションを組むより単純で堅牢）
+ * 対象店舗の認可コードフロー開始URLを組み立てる（ブラウザでこのURLを開き、PFID・パスワードで
+ * ログインすると、Webアプリ側のdoGet()にリダイレクトされ認可が完了する）
+ */
+const buildInfomartAuthorizationUrl_ = (storeName) => {
+  let clientCred = getInfomartClientCredentials_();
+  let redirectUri = getInfomartRedirectUri_();
+  let params = [
+    "realm=" + encodeURIComponent(INFOMART_CONFIG.realm),
+    "client_id=" + encodeURIComponent(clientCred.clientId),
+    "redirect_uri=" + encodeURIComponent(redirectUri),
+    "response_type=code",
+    "scope=" + encodeURIComponent(INFOMART_OAUTH_SCOPE_),
+    "state=" + encodeURIComponent(storeName),
+    "access_type=offline"
+  ];
+  return `${infomartAuthBase_()}/openam/oauth2/authorize?${params.join("&")}`;
+};
+
+/**
+ * 「予算・実績」D1で選択中の店舗の認可URLをダイアログで表示する（メニューから実行）
+ * 店舗ごとに一度だけ必要な操作。リンクをクリックしてその店舗のPFID・パスワードでログインすると、
+ * doGet() が認可コードを受け取ってリフレッシュトークンを保存する。
+ */
+const promptInfomartAuthorizationUrl = () => {
+  let budgetSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  let store = resolveSelectedSmaregiStore_(budgetSheet);
+  let url = buildInfomartAuthorizationUrl_(store.storeName);
+
+  let html = HtmlService.createHtmlOutput(
+    `<p>店舗「${store.storeName}」のインフォマート認可を行います。</p>`
+    + `<p><a href="${url}" target="_blank">こちらをクリックして認可画面を開く</a></p>`
+    + `<p>その店舗のPFID（ログインID）とパスワードでログインしてください。</p>`
+  ).setWidth(420).setHeight(200);
+  SpreadsheetApp.getUi().showModalDialog(html, "Infomart認可URLを発行");
+};
+
+/**
+ * OAuth2.0 認可コールバック（Webアプリとしてデプロイした場合のエントリポイント）
+ * インフォマートの認可画面でログイン後、ここへ code（許可コード）・state（店舗名）付きで
+ * リダイレクトされる。code を使ってアクセストークン・リフレッシュトークンを発行し、
+ * リフレッシュトークンを店舗名キーで保存する。
+ */
+const doGet = (e) => {
+  let params = (e && e.parameter) || {};
+  if (params.error) {
+    return HtmlService.createHtmlOutput(`<p>認可が拒否またはエラーになりました: ${params.error}</p>`);
+  }
+  let code = params.code;
+  let storeName = params.state;
+  if (!code || !storeName) {
+    return HtmlService.createHtmlOutput("<p>不正なコールバックです（code/stateが不足しています）。</p>");
+  }
+
+  try {
+    let clientCred = getInfomartClientCredentials_();
+    let redirectUri = getInfomartRedirectUri_();
+    let res = UrlFetchApp.fetch(`${infomartAuthBase_()}/openam/oauth2/access_token?realm=${encodeURIComponent(INFOMART_CONFIG.realm)}`, {
+      method: "post",
+      contentType: "application/x-www-form-urlencoded",
+      payload: {
+        grant_type: "authorization_code",
+        code: code,
+        redirect_uri: redirectUri,
+        client_id: clientCred.clientId,
+        client_secret: clientCred.clientSecret
+      },
+      muteHttpExceptions: true
+    });
+
+    let status = res.getResponseCode();
+    if (status !== 200) {
+      return HtmlService.createHtmlOutput(`<p>アクセストークン取得に失敗しました。status=${status} body=${res.getContentText().slice(0, 500)}</p>`);
+    }
+
+    let json = JSON.parse(res.getContentText());
+    setInfomartRefreshTokenForStore_(storeName, json.refresh_token);
+    Logger.log(`[Infomart認可] 店舗=${storeName} 認可完了`);
+    return HtmlService.createHtmlOutput(`<p>店舗「${storeName}」の認可が完了しました。このタブは閉じて構いません。</p>`);
+  } catch (err) {
+    return HtmlService.createHtmlOutput(`<p>認可処理でエラーが発生しました: ${err.message}</p>`);
+  }
+};
+
+/**
+ * リフレッシュトークンを使って店舗別のアクセストークンを取得（有効期限-60秒でキャッシュ）
+ * アクセストークン発行のたびにリフレッシュトークンもローテーション（新しい値に入れ替わる）
+ * ため、成功時は必ず setInfomartRefreshTokenForStore_ で保存し直す。
  */
 const getInfomartAccessToken_ = (storeName) => {
   let cache = CacheService.getScriptCache();
@@ -123,20 +233,17 @@ const getInfomartAccessToken_ = (storeName) => {
   let cached = cache.get(cacheKey);
   if (cached) return cached;
 
-  let cred = getInfomartCredentialsForStore_(storeName);
+  let refreshToken = getInfomartRefreshTokenForStore_(storeName);
   let clientCred = getInfomartClientCredentials_();
-  let authBase = INFOMART_CONFIG.useTestEnv ? INFOMART_CONFIG.authBaseTest : INFOMART_CONFIG.authBaseProd;
-  let tokenUrl = `${authBase}/api/credentials/access_token`;
 
-  let res = UrlFetchApp.fetch(tokenUrl, {
+  let res = UrlFetchApp.fetch(`${infomartAuthBase_()}/openam/oauth2/access_token?realm=${encodeURIComponent(INFOMART_CONFIG.realm)}`, {
     method: "post",
     contentType: "application/x-www-form-urlencoded",
     payload: {
-      user_id: cred.user_id,
-      user_password: cred.user_password,
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
       client_id: clientCred.clientId,
       client_secret: clientCred.clientSecret,
-      realm: INFOMART_CONFIG.realm,
       response_type: "json"
     },
     muteHttpExceptions: true
@@ -144,12 +251,16 @@ const getInfomartAccessToken_ = (storeName) => {
 
   let code = res.getResponseCode();
   if (code !== 200) {
-    throw new Error(`インフォマート アクセストークン取得失敗 [店舗=${storeName}] status=${code} body=${res.getContentText().slice(0, 500)}`);
+    throw new Error(
+      `インフォマート アクセストークン再発行失敗 [店舗=${storeName}] status=${code} body=${res.getContentText().slice(0, 500)}\n`
+      + "リフレッシュトークンが失効した可能性があります。メニューの「Infomart認可URLを発行」から再認可してください。"
+    );
   }
 
   let json = JSON.parse(res.getContentText());
   let accessToken = json.access_token;
   let expiresIn = Number(json.expires_in) || 300;
+  setInfomartRefreshTokenForStore_(storeName, json.refresh_token); // ローテーションされた新しいリフレッシュトークンを保存
   cache.put(cacheKey, accessToken, Math.max(60, expiresIn - 60));
   rememberApiTokenCacheKey_(cacheKey);
   return accessToken;
