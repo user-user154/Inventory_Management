@@ -788,17 +788,6 @@ const writeBudgetRatioAtDate_ = (budgetSheet, dateStr, columnName, value, number
   return writeBudgetRatioCellsOnRow_(budgetSheet, rowInfo, out, numberFormat);
 };
 
-/** 予算・実績の指定日・「原価率」列（目標）を読み取る */
-const readBudgetTargetCostRatio_ = (budgetSheet, dateStr, cachedMeta, cachedRowInfo) => {
-  let rowInfo = cachedRowInfo || findBudgetRowForDate_(budgetSheet, dateStr, cachedMeta);
-  if (!rowInfo) return null;
-
-  let idxTarget = findExactHeaderColumn_(rowInfo.headers, BUDGET_COL_TARGET_COST_RATIO_);
-  if (idxTarget < 0) return null;
-
-  return parseRatioCellValue_(budgetSheet.getRange(rowInfo.sheetRow, idxTarget + 1).getValue());
-};
-
 /** 予算・実績の指定日・「日次原価率」列（なければ「材料原価率」）を読み取る */
 const readBudgetDailyCostRatio_ = (budgetSheet, dateStr, cachedMeta, cachedRowInfo) => {
   let rowInfo = cachedRowInfo || findBudgetRowForDate_(budgetSheet, dateStr, cachedMeta);
@@ -893,7 +882,6 @@ const loadBudgetMonthIntoMap_ = (meta, year, month, budgetActualData) => {
 };
 
 /** 予算・実績の列見出し（名称完全一致） */
-const BUDGET_COL_TARGET_COST_RATIO_ = "原価率";
 const BUDGET_COL_DAILY_COST_RATIO_ = "日次原価率";
 const BUDGET_COL_MATERIAL_COST_RATIO_ = "材料原価率";
 const BUDGET_COL_WEEKLY_COST_RATIO_ = "週次原価率";
