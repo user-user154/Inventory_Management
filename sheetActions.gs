@@ -563,11 +563,6 @@ const commitOrderSheetToBacklogAndLog = () => {
   notifyUser(`確定コミット: ${dateStr} / バックログ ${backlogCount} 件 / 手動調整ログ ${entries.length} 件`);
 };
 
-/** メニュー互換 */
-const exportManualAdjustmentToLog = () => {
-  commitOrderSheetToBacklogAndLog();
-};
-
 /**
  * デバッグ用: バックログ系の履歴を一括削除
  * メニュー「発注管理」または Apps Script から resetBacklogRelatedHistory() を実行

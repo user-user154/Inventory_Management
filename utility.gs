@@ -698,24 +698,6 @@ const ensureBacklogSheetMeta_ = (sheet) => {
   };
 };
 
-/** 棚卸し日以降のバックログ置換開始行（日付列のみ読取） */
-const findBacklogReplaceStartRow = (sheet, meta, inventoryDateStr) => {
-  if (!sheet || !meta) return meta.dataStartRow;
-  let startRow = meta.dataStartRow;
-  let idxDate = meta.headers.indexOf("日付");
-  if (idxDate < 0 || !inventoryDateStr) return startRow;
-
-  let lastRow = sheet.getLastRow();
-  if (lastRow < startRow) return startRow;
-
-  let dateCol = sheet.getRange(startRow, idxDate + 1, lastRow - startRow + 1, 1).getValues();
-  for (let i = 0; i < dateCol.length; i++) {
-    let rowDateStr = formatSheetDateToKey(dateCol[i][0]);
-    if (rowDateStr && rowDateStr >= inventoryDateStr) return startRow + i;
-  }
-  return lastRow + 1;
-};
-
 const parseJstDateStr_ = (dateStr) => {
   return new Date(String(dateStr).trim() + "T12:00:00");
 };
@@ -857,10 +839,11 @@ const applyBacklogRetentionToRows_ = (rows, meta, ctx) => {
 };
 
 /**
- * 既存バックログ（棚卸し日未満）＋今回シミュレーション分をマージ
- * 棚卸し日未満は月跨ぎルールで必要最小限のみ残す
+ * 既存行（棚卸し日未満は月跨ぎルールで必要最小限のみ）＋今回シミュレーション分をマージ
+ * 日付→(secondarySortColがあればそれ)→1列目 の順でソートする
+ * バックログ・予測出数ログ（writeForecastDemandLog_）の両方で共用
  */
-const mergeBacklogWithRetention_ = (existingRows, newRows, meta, ctx) => {
+const mergeRowsWithBacklogRetention_ = (existingRows, newRows, meta, ctx, secondarySortCol) => {
   let idxDate = meta.headers.indexOf("日付");
   let invDateStr = (ctx && ctx.inventoryDateStr) || (ctx && ctx.targetDatesStr ? ctx.targetDatesStr[0] : "");
   let keepFrom = resolveBacklogHistoricalKeepFrom_(ctx);
@@ -875,6 +858,9 @@ const mergeBacklogWithRetention_ = (existingRows, newRows, meta, ctx) => {
     let da = formatSheetDateToKey(a[idxDate]) || "";
     let db = formatSheetDateToKey(b[idxDate]) || "";
     if (da !== db) return da < db ? -1 : 1;
+    if (secondarySortCol != null && String(a[secondarySortCol]) !== String(b[secondarySortCol])) {
+      return String(a[secondarySortCol]).localeCompare(String(b[secondarySortCol]), "ja");
+    }
     return String(a[1]).localeCompare(String(b[1]), "ja");
   });
   return merged;
@@ -918,7 +904,7 @@ const writeBacklogMergedOnce = (ctx, backlogRows) => {
   let invDateStr = ctx.inventoryDateStr || (ctx.targetDatesStr ? ctx.targetDatesStr[0] : "");
   let keepFrom = resolveBacklogHistoricalKeepFrom_(ctx);
   let existingRows = readBacklogDataRows_(sheet, meta);
-  let merged = mergeBacklogWithRetention_(existingRows, backlogRows, meta, ctx);
+  let merged = mergeRowsWithBacklogRetention_(existingRows, backlogRows, meta, ctx);
   let rowsWritten = writeBacklogDataRows_(sheet, meta, merged);
 
   if (rowsWritten <= 0) {
@@ -994,27 +980,6 @@ const appendForecastDemandRows_ = (rows, dateStr, qtyMap, purpose, rawMaster, ba
   });
 };
 
-const mergeForecastDemandWithRetention_ = (existingRows, newRows, meta, ctx) => {
-  let idxDate = meta.headers.indexOf("日付");
-  let invDateStr = (ctx && ctx.inventoryDateStr) || (ctx && ctx.targetDatesStr ? ctx.targetDatesStr[0] : "");
-  let keepFrom = resolveBacklogHistoricalKeepFrom_(ctx);
-
-  let historical = (existingRows || []).filter((row) => {
-    let d = formatSheetDateToKey(row[idxDate]);
-    return d && d < invDateStr && d >= keepFrom;
-  });
-
-  let merged = historical.concat(newRows || []);
-  merged.sort((a, b) => {
-    let da = formatSheetDateToKey(a[idxDate]) || "";
-    let db = formatSheetDateToKey(b[idxDate]) || "";
-    if (da !== db) return da < db ? -1 : 1;
-    if (String(a[2]) !== String(b[2])) return String(a[2]).localeCompare(String(b[2]), "ja");
-    return String(a[1]).localeCompare(String(b[1]), "ja");
-  });
-  return merged;
-};
-
 /**
  * 予測出数ログを1回書込（棚卸し日以降を今回シミュレーション結果で置換）
  * 仕込み・発注はバックログと共有。ここは原材料の理論原価／在庫消費のみ。
@@ -1038,7 +1003,7 @@ const writeForecastDemandLog_ = (ctx, demandCache) => {
 
   let invDateStr = ctx.inventoryDateStr || (ctx.targetDatesStr ? ctx.targetDatesStr[0] : "");
   let existingRows = readForecastDemandDataRows_(sheet, meta);
-  let merged = mergeForecastDemandWithRetention_(existingRows, rows, meta, ctx);
+  let merged = mergeRowsWithBacklogRetention_(existingRows, rows, meta, ctx, 2);
   let rowsWritten = writeBacklogDataRows_(sheet, meta, merged);
 
   Logger.log(`[予測出数] 書込 ${rowsWritten} 行（棚卸し=${invDateStr}〜）`);
@@ -1500,14 +1465,6 @@ const capOrderQtyByMaxStockAtDelivery_ = (rName, rawRow, stockAtDeliveryMinUnit,
   return desired <= maxAllowed + 1e-6 ? desired : maxAllowed;
 };
 
-/** @deprecated capOrderQtyByMaxStockAtDelivery_ の headroom 算出用 */
-const maxOrderQtyByMaxStockMinUnit_ = (rawRow, onePackMin, stockAtDeliveryMinUnit) => {
-  let maxMin = maxStockMinUnitAtDelivery_(rawRow);
-  if (maxMin === null) return null;
-  let stock = Math.max(0, Number(stockAtDeliveryMinUnit) || 0);
-  return Math.max(0, maxMin - stock);
-};
-
 const canAddLot14Pack_ = (
   rName, rawRow, onePackMin, orderDayIdx, todayOrders, currentStock, ctx, dailyBuffered, precomputed, holidayCache, lot14Options
 ) => {
@@ -1953,17 +1910,6 @@ const resolveSimulationDays = (period, orderDate, b3Fallback) => {
   return (n && n > 0) ? Math.floor(n) : 7;
 };
 
-/**
- * 指示書 B2 を必ずシミュレーション範囲に含む日数。
- * 棚卸し起点で週間7日などが短いとき、B2 が範囲外→別日を出力する不具合を防ぐ。
- */
-const getMaxVendorLeadTimeDays_ = (ss) => {
-  if (!ss) return 0;
-  let sheet = ss.getSheetByName(SHEET_NAMES.VENDOR_MASTER);
-  if (!sheet) return 0;
-  return getMaxVendorLeadTimeDaysFromData_(loadSTVendorCalendar(sheet));
-};
-
 const getMaxVendorLeadTimeDaysFromData_ = (vendorData) => {
   let cals = (vendorData && vendorData.calendars) || {};
   let maxLt = 0;
@@ -1973,6 +1919,10 @@ const getMaxVendorLeadTimeDaysFromData_ = (vendorData) => {
   return maxLt;
 };
 
+/**
+ * 指示書 B2 を必ずシミュレーション範囲に含む日数。
+ * 棚卸し起点で週間7日などが短いとき、B2 が範囲外→別日を出力する不具合を防ぐ。
+ */
 const resolveSimulationDaysIncludingOrderDate = (period, simStartDate, orderDate, b3Fallback, maxLeadTimeDays) => {
   let baseDays = resolveSimulationDays(period, simStartDate, b3Fallback);
   let idxForOrder = getOrderSheetDayIndex(orderDate, period, simStartDate);
@@ -2013,14 +1963,6 @@ const writeSheetRows = (sheet, startRow, startCol, values) => {
   let numRows = values.length;
   let numCols = values[0].length;
   sheet.getRange(startRow, startCol, numRows, numCols).setValues(values);
-};
-
-/** startRow 以降・指定列幅をクリア */
-const clearSheetFromRow = (sheet, startRow, startCol, numCols) => {
-  if (!sheet) return;
-  let lastRow = sheet.getLastRow();
-  if (lastRow < startRow) return;
-  sheet.getRange(startRow, startCol, lastRow - startRow + 1, numCols).clearContent();
 };
 
 /** 指示書の仕込み・発注データ行の開始行 */
@@ -2434,24 +2376,6 @@ const clearSheetTriggerCheckboxes_ = (sheet, triggerCells, skipPropKey) => {
   }
 };
 
-/** 1行目の操作チェックボックス列を初期化（未設定セルのみ） */
-const setupSheetTriggerCheckboxes_ = (sheet, triggerCells, skipPropKey) => {
-  if (!sheet || !triggerCells) return;
-  let props = PropertiesService.getScriptProperties();
-  props.setProperty(skipPropKey, "1");
-  try {
-    triggerCells.forEach((cell) => {
-      let range = sheet.getRange(cell.row, cell.col, 1, 1);
-      if (range.getDataValidation() == null) {
-        range.insertCheckboxes();
-        range.setValue(false);
-      }
-    });
-  } finally {
-    props.deleteProperty(skipPropKey);
-  }
-};
-
 /** 指示書 B1 がオン固定のまま残っているときにリセット */
 const resetStuckOrderSheetCheckboxIfNeeded_ = (sheet) => {
   if (!sheet) return;
@@ -2573,16 +2497,6 @@ const isCheckboxTurnedOn_ = (e, range) => {
   if (!isCheckboxCheckedValue(newVal)) return false;
   if (oldVal === undefined) return true;
   return !isCheckboxCheckedValue(oldVal);
-};
-
-/** onEdit で値が実質変わっていない編集を無視 */
-const editValueUnchanged_ = (e) => {
-  if (!e) return true;
-  let oldV = e.oldValue;
-  let newV = e.value;
-  if (oldV === undefined && newV === undefined) return true;
-  if (oldV === undefined || newV === undefined) return false;
-  return String(oldV) === String(newV);
 };
 
 /**
@@ -2939,12 +2853,6 @@ const findHeaderColumnsInRowBlock_ = (headerRows, headerName, maxHeaderRow, minC
     }
   }
   return found;
-};
-
-const findHeaderColumnsInColumnRange_ = (sheet, headerName, maxHeaderRow, minCol, maxCol) => {
-  let lastCol = Math.max(sheet.getLastColumn(), maxCol);
-  let headerRows = readOrderSheetHeaderRows_(sheet, maxHeaderRow, lastCol);
-  return findHeaderColumnsInRowBlock_(headerRows, headerName, maxHeaderRow, minCol, maxCol);
 };
 
 /** 指示書ブロックの名称列を見出しから解決（見つからなければ既定列） */

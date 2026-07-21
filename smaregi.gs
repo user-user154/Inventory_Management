@@ -168,7 +168,7 @@ const resolveSelectedSmaregiStore_ = (budgetSheet) => {
  * スマレジの店舗一覧を取得し、予算・実績 C1(見出し)/D1(プルダウン) を整備する（メニューから手動実行）
  * D1 の選択肢は "storeId: storeName" 形式。既存の選択値が一覧に残っていればそのまま維持する。
  */
-const setupSmaregiStoreDropdown_ = () => {
+const setupSmaregiStoreDropdown = () => {
   let stores = getSmaregiStores_();
   if (stores.length === 0) {
     notifyUser("スマレジに店舗が1件も見つかりませんでした。");
@@ -367,7 +367,7 @@ const runDailyPosImportAndPlanNextDay = () => {
 };
 
 /** 日付を指定して手動再取得（空欄なら本日、対象店舗は予算・実績 D1 の選択に従う） */
-const promptAndImportSmaregiActuals_ = () => {
+const promptAndImportSmaregiActuals = () => {
   let ss = SpreadsheetApp.getActiveSpreadsheet();
   let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
   let store = resolveSelectedSmaregiStore_(budgetSheet);

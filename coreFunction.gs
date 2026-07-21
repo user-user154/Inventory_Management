@@ -35,10 +35,6 @@ const stripExcludedLookaheadItems_ = (demandMap) => {
   return out;
 };
 
-const isMeatSashiItem_ = (itemName) => {
-  return PREP_LOT_EXPIRY_RULES_[itemName] === "meat_sashi";
-};
-
 /**
  * 仕込みロットの消費期限・自動廃棄チェック
  * （日次仕込み在庫スライド計算 precomputeDailyDemands 内で呼び出す）
@@ -72,11 +68,6 @@ const isPrepLotExpired_ = (itemName, dateOpenedStr, currentDateStr) => {
   }
   // 通常: 翌日・翌々日の2日間 → 3日目で廃棄
   return diffDays >= 3;
-};
-
-/** @deprecated isPrepLotExpired_ の別名（肉刺し向け呼び出し互換） */
-const isMeatSashiExpired = (itemName, dateOpenedStr, currentDateStr) => {
-  return isPrepLotExpired_(itemName, dateOpenedStr, currentDateStr);
 };
 
 const diffCalendarDaysJst_ = (fromStr, toStr) => {
@@ -780,43 +771,6 @@ const finalizeDailyDemandsFromScaled_ = (ctx, prepDemand, directRawDemand) => {
     rawConsumption: rawConsumption,
     prepRawConsumption: prepRawConsumption,
     directRawConsumption: Object.assign({}, directRawDemand)
-  };
-};
-
-const computeDailyDemandsDetailed = (ctx, baseAmount, dayIdx) => {
-  let prepDemand = {};
-  let directRawDemand = {};
-
-  if (baseAmount > 0 && ctx.posCleanData && ctx.posCleanData.length > 0) {
-    ctx.posCleanData.forEach((posRow) => {
-      let predictedMenuSales = calcPredictedMenuSales(posRow, ctx, baseAmount);
-      if (predictedMenuSales > 0) {
-        expandMenuToDemands(posRow.menuName, predictedMenuSales, ctx, prepDemand, directRawDemand);
-      }
-    });
-  }
-
-  if (dayIdx === 0) {
-    reducePrepDemandByStock_(prepDemand, ctx);
-  }
-
-  let inProcess = finalizePrepInstructions(prepDemand, ctx);
-  collectNestedPrepInstructions(inProcess, ctx);
-
-  let prepRawConsumption = {};
-  expandPrepsToRaw(prepDemand, inProcess, ctx, prepRawConsumption);
-
-  let rawConsumption = Object.assign({}, directRawDemand);
-  Object.keys(prepRawConsumption).forEach((rName) => {
-    rawConsumption[rName] = (rawConsumption[rName] || 0) + prepRawConsumption[rName];
-  });
-
-  return {
-    prepDemand: prepDemand,
-    inProcess: inProcess,
-    directRawConsumption: directRawDemand,
-    prepRawConsumption: prepRawConsumption,
-    rawConsumption: rawConsumption
   };
 };
 
