@@ -1697,16 +1697,49 @@ const getBA = (budgetActualData, dateObj) => {
   return budgetActualData[dateStr] || null;
 };
 
+const SALES_BIAS_LOOKBACK_DAYS_ = 14;
+const SALES_BIAS_MIN_SAMPLES_ = 5;
+const SALES_BIAS_CLAMP_MIN_ = 0.85;
+const SALES_BIAS_CLAMP_MAX_ = 1.15;
+
 /**
- * 日次売上基準: 実績が入力されていれば実績、なければ予算
+ * 予算ベース予測のバイアス補正係数（実績÷予算の中央値、直近実績日を遡って収集）
+ * - 中央値を使うことで単発の特売日・イベント日による過剰補正を抑える
+ * - サンプル不足時(SALES_BIAS_MIN_SAMPLES_未満)は補正なし(1)にフォールバック
+ * - ±15%(SALES_BIAS_CLAMP_MIN_/MAX_)を超える補正はかけない
+ */
+const calcSalesBiasCoefficient_ = (budgetActualData, referenceDateStr) => {
+  let ratios = [];
+  let cursor = referenceDateStr;
+  for (let i = 0; i < SALES_BIAS_LOOKBACK_DAYS_ * 2 && ratios.length < SALES_BIAS_LOOKBACK_DAYS_; i++) {
+    cursor = addDaysToDateStr_(cursor, -1);
+    let ba = budgetActualData[cursor];
+    if (ba && ba.hasActual && Number(ba.budget) > 0) {
+      ratios.push(Number(ba.actual) / Number(ba.budget));
+    }
+  }
+  if (ratios.length < SALES_BIAS_MIN_SAMPLES_) return 1;
+
+  ratios.sort((a, b) => a - b);
+  let mid = Math.floor(ratios.length / 2);
+  let median = ratios.length % 2 === 0 ? (ratios[mid - 1] + ratios[mid]) / 2 : ratios[mid];
+
+  return Math.min(SALES_BIAS_CLAMP_MAX_, Math.max(SALES_BIAS_CLAMP_MIN_, median));
+};
+
+/**
+ * 日次売上基準: 実績が入力されていれば実績、なければ予算（バイアス係数で補正）
  * @return {{ amount: number, baseFlag: string }}
  */
-const resolveDailySalesBase_ = (ba) => {
+const resolveDailySalesBase_ = (ba, biasCoefficient) => {
   if (!ba) return { amount: 0, baseFlag: "予算ベース" };
   if (ba.hasActual) {
     return { amount: Number(ba.actual) || 0, baseFlag: "実績ベース" };
   }
-  return { amount: Number(ba.budget) || 0, baseFlag: "予算ベース" };
+  let coef = biasCoefficient != null ? biasCoefficient : 1;
+  let amount = (Number(ba.budget) || 0) * coef;
+  let baseFlag = coef !== 1 ? `予算ベース(補正${coef.toFixed(2)}倍)` : "予算ベース";
+  return { amount: amount, baseFlag: baseFlag };
 };
 
 /**
@@ -1716,7 +1749,9 @@ const resolveDailySalesBase_ = (ba) => {
 const resolveNextDayPrepLookaheadAmount_ = (ctx, dayIdx) => {
   if (!ctx.targetDatesStr || dayIdx + 1 >= ctx.targetDatesStr.length) return 0;
   let nextBa = ctx.budgetActualData[ctx.targetDatesStr[dayIdx + 1]];
-  return nextBa ? (Number(nextBa.budget) || 0) * 0.5 : 0;
+  if (!nextBa) return 0;
+  let coef = ctx.salesBiasCoefficient != null ? ctx.salesBiasCoefficient : 1;
+  return (Number(nextBa.budget) || 0) * coef * 0.5;
 };
 
 /**
