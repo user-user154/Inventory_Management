@@ -831,12 +831,6 @@ const filterActiveRawNamesForOrder_ = (rawNames, ctx, initialStock, consumptionP
   });
 };
 
-/** 売上1円あたりの原材料最小単位需要（メニュー出数・歩留まりロス除く） */
-const precomputeUnitCostRawDemand_ = (ctx, unitMenuDemands) => {
-  let unit = unitMenuDemands || computeUnitMenuDemands_(ctx);
-  return finalizeCostRawDemandFromScaled_(ctx, unit.prepDemand, unit.directRawDemand, { skipYield: true });
-};
-
 /**
  * 予測出数キャッシュ（1回のシミュレーション内で発注・仕込み・原価率が共有するDB）
  *
@@ -847,18 +841,16 @@ const precomputeUnitCostRawDemand_ = (ctx, unitMenuDemands) => {
  */
 const buildDemandCache_ = (ctx) => {
   let unitMenuDemands = computeUnitMenuDemands_(ctx);
-  let unitCostRawDemand = precomputeUnitCostRawDemand_(ctx, unitMenuDemands);
   let unitPrepYieldLossRaw = precomputeUnitPrepYieldLossRaw_(ctx);
   let unitPrepWasteRaw = precomputeUnitPrepWasteRaw_(ctx);
   ctx._unitPrepYieldLossRaw = unitPrepYieldLossRaw;
   ctx._unitPrepWasteRaw = unitPrepWasteRaw;
   ctx._itemSalesBiasCoefficients = calcItemSalesBiasCoefficients_(ctx, unitMenuDemands).coefficients;
   let days = precomputeDailyDemands(
-    ctx, unitMenuDemands, unitCostRawDemand, unitPrepYieldLossRaw, unitPrepWasteRaw
+    ctx, unitMenuDemands, unitPrepYieldLossRaw, unitPrepWasteRaw
   );
   return {
     unitMenuDemands: unitMenuDemands,
-    unitCostRawDemand: unitCostRawDemand,
     unitPrepYieldLossRaw: unitPrepYieldLossRaw,
     unitPrepWasteRaw: unitPrepWasteRaw,
     days: days
@@ -866,9 +858,8 @@ const buildDemandCache_ = (ctx) => {
 };
 
 /** シミュレーション全日の需要を事前計算（POS×レシピ展開は売上1円分のみ、日次は倍率適用） */
-const precomputeDailyDemands = (ctx, unitMenuDemands, unitCostRawDemand, unitPrepYieldLossRaw, unitPrepWasteRaw) => {
+const precomputeDailyDemands = (ctx, unitMenuDemands, unitPrepYieldLossRaw, unitPrepWasteRaw) => {
   let unit = unitMenuDemands || computeUnitMenuDemands_(ctx);
-  let unitCostRaw = unitCostRawDemand || precomputeUnitCostRawDemand_(ctx, unit);
   let yieldLossUnit = unitPrepYieldLossRaw || ctx._unitPrepYieldLossRaw || precomputeUnitPrepYieldLossRaw_(ctx);
   let wasteUnit = unitPrepWasteRaw || ctx._unitPrepWasteRaw || precomputeUnitPrepWasteRaw_(ctx);
   let byDay = [];
@@ -897,7 +888,14 @@ const precomputeDailyDemands = (ctx, unitMenuDemands, unitCostRawDemand, unitPre
       let lookaheadPrepDemand = stripExcludedLookaheadItems_(scaleDemandMapWithItemBias_(unit.prepDemand, lookaheadAmount, itemBias));
       prepDemand = mergeRawDemandMaps_(scaleDemandMapWithItemBias_(unit.prepDemand, factor, itemBias), lookaheadPrepDemand);
       directRawDemand = scaleDemandMapWithItemBias_(unit.directRawDemand, factor, itemBias);
-      menuRawDemand = factor > 0 ? scaleDemandMap_(unitCostRaw, factor) : {};
+      menuRawDemand = factor > 0
+        ? finalizeCostRawDemandFromScaled_(
+          ctx,
+          scaleDemandMapWithItemBias_(unit.prepDemand, factor, itemBias),
+          scaleDemandMapWithItemBias_(unit.directRawDemand, factor, itemBias),
+          { skipYield: true }
+        )
+        : {};
     }
 
     let wastePrepQty = purgeExpiredPrepLots_(prepLots, dateStr, ctx);
