@@ -669,12 +669,6 @@ const scaleDemandMapWithItemBias_ = (src, factor, itemBias) => {
   return out;
 };
 
-/** バイアス係数の集計から除外するレシピ備考（大量にありレシピ構成上影響が薄いドリンク・その他） */
-const BIAS_EXCLUDED_RECIPE_NOTES_ = { "その他": true, "ドリンク": true };
-const isRecipeExcludedFromBiasCalc_ = (recipe) => {
-  return !!(recipe && BIAS_EXCLUDED_RECIPE_NOTES_[recipe.note]);
-};
-
 const accumulateItemRatios_ = (detailByItem, dateStr, predictedMap, actualMap) => {
   Object.keys(predictedMap).forEach((item) => {
     let predicted = predictedMap[item];
@@ -689,7 +683,7 @@ const accumulateItemRatios_ = (detailByItem, dateStr, predictedMap, actualMap) =
  * 商品(仕込み品・原材料)ごとのバイアス補正係数
  * 実績出数ログがある過去日について「レシピ構成比(unit) × その日の実売上」の予測需要と、
  * 実際の出数展開結果を比較し、品目ごとに実績/予測比の中央値を算出する。
- * レシピ備考が「その他」「ドリンク」の商品(行)は集計対象から除外し計算量を抑える。
+ * チャージ料・おかわり等(備考「その他」)にのみ紐づく品目があるため、備考による除外は行わず全行を対象とする。
  * @return {{ coefficients: Object, detail: Object }} detailは診断用の日次(predicted/actual/ratio)一覧
  */
 const calcItemSalesBiasCoefficients_ = (ctx, unit) => {
@@ -706,10 +700,7 @@ const calcItemSalesBiasCoefficients_ = (ctx, unit) => {
     let ba = ctx.budgetActualData[cursor];
     if (!actualRows || actualRows.length === 0 || !ba || !ba.hasActual || !(Number(ba.actual) > 0)) continue;
 
-    let filteredRows = actualRows.filter((row) => {
-      return !isRecipeExcludedFromBiasCalc_(ctx.recipeMaster[row.menuName]);
-    });
-    let actualExpanded = expandActualDayDemands_(ctx, filteredRows);
+    let actualExpanded = expandActualDayDemands_(ctx, actualRows);
     let actualSalesAmount = Number(ba.actual);
 
     accumulateItemRatios_(detailByItem, cursor, scaleDemandMap_(unit.prepDemand, actualSalesAmount), actualExpanded.prepDemand);
