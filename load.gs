@@ -292,6 +292,7 @@ const logRecipeIngredientWarnings_ = (recipeMaster, prepRecipes, rawMaster) => {
   };
 
   Object.keys(recipeMaster || {}).forEach((menu) => {
+    if (Number(recipeMaster[menu].stopFlag) === 1) return;
     (recipeMaster[menu].ingredients || []).forEach((ing) => {
       if (!rawMaster[ing.name] && !prepRecipes[ing.name]) {
         warnOnce_(`レシピ「${menu}」`, ing.name);
@@ -300,6 +301,7 @@ const logRecipeIngredientWarnings_ = (recipeMaster, prepRecipes, rawMaster) => {
   });
 
   Object.keys(prepRecipes || {}).forEach((prepName) => {
+    if (Number(prepRecipes[prepName].stopFlag) === 1) return;
     (prepRecipes[prepName].ingredients || []).forEach((ing) => {
       if (!rawMaster[ing.name] && !prepRecipes[ing.name]) {
         warnOnce_(`中間レシピ「${prepName}」`, ing.name);
@@ -551,6 +553,7 @@ const loadRecipeMaster = (sheet, unifyMap) => {
 
   let idxName = meta.headers.indexOf("統一商品名");
   let idxNote = findColumnIndex_(meta.headers, ["備考"], -1);
+  let idxStop = findColumnIndex_(meta.headers, ["停止フラグ"], -1);
 
   for (let i = meta.dataStartRow; i < meta.fullData.length; i++) {
     let name = String(meta.fullData[i][idxName]).trim();
@@ -558,6 +561,7 @@ const loadRecipeMaster = (sheet, unifyMap) => {
 
     map[name] = {
       note: idxNote !== -1 ? String(meta.fullData[i][idxNote]).trim() : "",
+      stopFlag: idxStop !== -1 ? (Number(meta.fullData[i][idxStop]) || 0) : 0,
       ingredients: loadIngredientRows_(meta.headers, meta.fullData[i], 6, unifyMap, false)
     };
   }
