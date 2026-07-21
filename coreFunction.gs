@@ -675,13 +675,13 @@ const isRecipeExcludedFromBiasCalc_ = (recipe) => {
   return !!(recipe && BIAS_EXCLUDED_RECIPE_NOTES_[recipe.note]);
 };
 
-const accumulateItemRatios_ = (ratiosByItem, predictedMap, actualMap) => {
+const accumulateItemRatios_ = (detailByItem, dateStr, predictedMap, actualMap) => {
   Object.keys(predictedMap).forEach((item) => {
     let predicted = predictedMap[item];
     if (!(predicted > 0)) return;
     let actual = (actualMap && actualMap[item]) || 0;
-    if (!ratiosByItem[item]) ratiosByItem[item] = [];
-    ratiosByItem[item].push(actual / predicted);
+    if (!detailByItem[item]) detailByItem[item] = [];
+    detailByItem[item].push({ date: dateStr, predicted: predicted, actual: actual, ratio: actual / predicted });
   });
 };
 
@@ -690,10 +690,13 @@ const accumulateItemRatios_ = (ratiosByItem, predictedMap, actualMap) => {
  * 実績出数ログがある過去日について「レシピ構成比(unit) × その日の実売上」の予測需要と、
  * 実際の出数展開結果を比較し、品目ごとに実績/予測比の中央値を算出する。
  * レシピ備考が「その他」「ドリンク」の商品(行)は集計対象から除外し計算量を抑える。
+ * @return {{ coefficients: Object, detail: Object }} detailは診断用の日次(predicted/actual/ratio)一覧
  */
 const calcItemSalesBiasCoefficients_ = (ctx, unit) => {
-  let ratiosByItem = {};
-  if (!ctx.targetDatesStr || !ctx.actualSalesLogData || !ctx.budgetActualData) return {};
+  let detailByItem = {};
+  if (!ctx.targetDatesStr || !ctx.actualSalesLogData || !ctx.budgetActualData) {
+    return { coefficients: {}, detail: {} };
+  }
 
   let cursor = ctx.targetDatesStr[0];
   let daysUsed = 0;
@@ -709,22 +712,22 @@ const calcItemSalesBiasCoefficients_ = (ctx, unit) => {
     let actualExpanded = expandActualDayDemands_(ctx, filteredRows);
     let actualSalesAmount = Number(ba.actual);
 
-    accumulateItemRatios_(ratiosByItem, scaleDemandMap_(unit.prepDemand, actualSalesAmount), actualExpanded.prepDemand);
-    accumulateItemRatios_(ratiosByItem, scaleDemandMap_(unit.directRawDemand, actualSalesAmount), actualExpanded.directRawDemand);
+    accumulateItemRatios_(detailByItem, cursor, scaleDemandMap_(unit.prepDemand, actualSalesAmount), actualExpanded.prepDemand);
+    accumulateItemRatios_(detailByItem, cursor, scaleDemandMap_(unit.directRawDemand, actualSalesAmount), actualExpanded.directRawDemand);
     daysUsed++;
   }
 
   let coefficients = {};
-  Object.keys(ratiosByItem).forEach((item) => {
-    let ratios = ratiosByItem[item];
+  Object.keys(detailByItem).forEach((item) => {
+    let ratios = detailByItem[item].map((row) => row.ratio);
     if (ratios.length < SALES_BIAS_MIN_SAMPLES_) return;
-    ratios.sort((a, b) => a - b);
-    let mid = Math.floor(ratios.length / 2);
-    let median = ratios.length % 2 === 0 ? (ratios[mid - 1] + ratios[mid]) / 2 : ratios[mid];
+    let sorted = ratios.slice().sort((a, b) => a - b);
+    let mid = Math.floor(sorted.length / 2);
+    let median = sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
     coefficients[item] = Math.min(SALES_BIAS_CLAMP_MAX_, Math.max(SALES_BIAS_CLAMP_MIN_, median));
   });
   Logger.log(`[需要予測] 商品別バイアス係数を${Object.keys(coefficients).length}品目分算出（対象実績日=${daysUsed}日）`);
-  return coefficients;
+  return { coefficients: coefficients, detail: detailByItem };
 };
 
 /** 売上1円あたりのメニュー需要（POS×レシピ展開）を1回だけ計算 */
@@ -845,7 +848,7 @@ const buildDemandCache_ = (ctx) => {
   let unitPrepWasteRaw = precomputeUnitPrepWasteRaw_(ctx);
   ctx._unitPrepYieldLossRaw = unitPrepYieldLossRaw;
   ctx._unitPrepWasteRaw = unitPrepWasteRaw;
-  ctx._itemSalesBiasCoefficients = calcItemSalesBiasCoefficients_(ctx, unitMenuDemands);
+  ctx._itemSalesBiasCoefficients = calcItemSalesBiasCoefficients_(ctx, unitMenuDemands).coefficients;
   let days = precomputeDailyDemands(
     ctx, unitMenuDemands, unitCostRawDemand, unitPrepYieldLossRaw, unitPrepWasteRaw
   );
