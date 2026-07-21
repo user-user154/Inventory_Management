@@ -2608,8 +2608,14 @@ const collectOrderSheetOrdersForDay_ = (ctx, simulationResults, dayIdx) => {
   return merged;
 };
 
-/** 指示書仕込み欄に出さない仕込み品（低温用〇〇 など） */
+/** 指示書仕込み欄に出さない仕込み品名（完全一致） */
+const PREP_HIDDEN_ON_ORDER_SHEET_NAMES_ = {
+  "ご飯": true
+};
+
+/** 指示書仕込み欄に出さない仕込み品（低温用〇〇 など、および個別指定品） */
 const isPrepHiddenOnOrderSheet_ = (prepName) => {
+  if (PREP_HIDDEN_ON_ORDER_SHEET_NAMES_[prepName]) return true;
   return String(prepName).indexOf("低温用") === 0;
 };
 
