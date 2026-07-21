@@ -36,8 +36,11 @@ const SMAREGI_CONFIG = {
 
 /** インフォマート BtoBプラットフォームAPI 接続先（契約情報はシークレットではないためここに置く。
  *  全店舗共通のクライアントID/シークレットはスクリプトプロパティ INFOMART_CLIENT_ID /
- *  INFOMART_CLIENT_SECRET、店舗ごとのログインID/パスワードは INFOMART_STORE_CREDENTIALS に
- *  店舗名→{user_id,user_password} のJSONマップとして格納する。詳細はinfomart.gs参照） */
+ *  INFOMART_CLIENT_SECRET、認可コールバックURLは INFOMART_REDIRECT_URI、店舗ごとの
+ *  リフレッシュトークンは INFOMART_REFRESH_TOKENS に店舗名→トークン文字列のJSONマップとして
+ *  格納する（doGet()が認可完了時に自動保存。手動設定不要）。詳細はinfomart.gs参照。
+ *  認証エンドポイントは /openam/oauth2/authorize・/openam/oauth2/access_token
+ *  （旧実装で使っていた /api/credentials/access_token は正式なOAuth手順に存在しないため廃止）） */
 const INFOMART_CONFIG = {
   authBaseProd: "https://auth.infomart.co.jp",
   authBaseTest: "http://authtest.infomart.co.jp",
