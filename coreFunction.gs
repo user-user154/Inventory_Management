@@ -427,6 +427,7 @@ const calcPredictedMenuSales = (posRow, ctx, baseAmount) => {
 const expandMenuToDemands = (menuName, predictedQty, ctx, prepDemand, rawDemand) => {
   let recipe = ctx.recipeMaster[menuName];
   if (!recipe || !recipe.ingredients || recipe.ingredients.length === 0) return;
+  if (Number(recipe.stopFlag) === 1) return;
 
   recipe.ingredients.forEach((ing) => {
     let need = ing.qty * predictedQty;
@@ -434,6 +435,7 @@ const expandMenuToDemands = (menuName, predictedQty, ctx, prepDemand, rawDemand)
 
     let target = routeUnifiedMaterial_(ing.name, ctx);
     if (target.kind === "prep") {
+      if (Number(ctx.preparationRecipes[target.name].stopFlag) === 1) return;
       prepDemand[target.name] = (prepDemand[target.name] || 0) + need;
     } else if (target.kind === "raw") {
       if (Number(ctx.rawMaster[target.name].stopFlag) === 1) return;
