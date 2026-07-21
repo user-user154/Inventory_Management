@@ -669,10 +669,20 @@ const scaleDemandMapWithItemBias_ = (src, factor, itemBias) => {
   return out;
 };
 
-const accumulateItemRatios_ = (detailByItem, dateStr, predictedMap, actualMap) => {
+/** 停止フラグ=1の仕込み品・原材料（廃止予定だが復活の可能性があるため残置） */
+const isItemStoppedForBias_ = (ctx, itemName) => {
+  let prep = ctx.preparationRecipes && ctx.preparationRecipes[itemName];
+  if (prep) return Number(prep.stopFlag) === 1;
+  let raw = ctx.rawMaster && ctx.rawMaster[itemName];
+  if (raw) return Number(raw.stopFlag) === 1;
+  return false;
+};
+
+const accumulateItemRatios_ = (ctx, detailByItem, dateStr, predictedMap, actualMap) => {
   Object.keys(predictedMap).forEach((item) => {
     let predicted = predictedMap[item];
     if (!(predicted > 0)) return;
+    if (isItemStoppedForBias_(ctx, item)) return;
     let actual = (actualMap && actualMap[item]) || 0;
     if (!detailByItem[item]) detailByItem[item] = [];
     detailByItem[item].push({ date: dateStr, predicted: predicted, actual: actual, ratio: actual / predicted });
@@ -683,7 +693,8 @@ const accumulateItemRatios_ = (detailByItem, dateStr, predictedMap, actualMap) =
  * 商品(仕込み品・原材料)ごとのバイアス補正係数
  * 実績出数ログがある過去日について「レシピ構成比(unit) × その日の実売上」の予測需要と、
  * 実際の出数展開結果を比較し、品目ごとに実績/予測比の中央値を算出する。
- * チャージ料・おかわり等(備考「その他」)にのみ紐づく品目があるため、備考による除外は行わず全行を対象とする。
+ * チャージ料・おかわり等(備考「その他」)にのみ紐づく品目があるため、備考による除外は行わない。
+ * 停止フラグ=1の品目は、予測側(過去のPOS参照期間の残存分)と実績側が構造的にズレるため除外する。
  * @return {{ coefficients: Object, detail: Object }} detailは診断用の日次(predicted/actual/ratio)一覧
  */
 const calcItemSalesBiasCoefficients_ = (ctx, unit) => {
@@ -703,8 +714,8 @@ const calcItemSalesBiasCoefficients_ = (ctx, unit) => {
     let actualExpanded = expandActualDayDemands_(ctx, actualRows);
     let actualSalesAmount = Number(ba.actual);
 
-    accumulateItemRatios_(detailByItem, cursor, scaleDemandMap_(unit.prepDemand, actualSalesAmount), actualExpanded.prepDemand);
-    accumulateItemRatios_(detailByItem, cursor, scaleDemandMap_(unit.directRawDemand, actualSalesAmount), actualExpanded.directRawDemand);
+    accumulateItemRatios_(ctx, detailByItem, cursor, scaleDemandMap_(unit.prepDemand, actualSalesAmount), actualExpanded.prepDemand);
+    accumulateItemRatios_(ctx, detailByItem, cursor, scaleDemandMap_(unit.directRawDemand, actualSalesAmount), actualExpanded.directRawDemand);
     daysUsed++;
   }
 
