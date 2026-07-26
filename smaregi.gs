@@ -344,9 +344,10 @@ const runSmaregiDailyAutoImport = () => {
 };
 
 /**
- * 毎晩22:45ごろの時間トリガー本体: 当日分のスマレジ実績を取り込み、
+ * 毎晩23:10ごろの時間トリガー本体: 当日分のスマレジ実績を取り込み、
  * その実績を使って翌日の仕込み・発注指示を計算し指示書へ反映する。
- * 例: 22:45に7/1の実績を取込→指示書B2を7/2に設定→7/2の計算を実行。
+ * 例: 23:10に7/1の実績を取込→指示書B2を7/2に設定→7/2の計算を実行。
+ * （22:45だと当日の遅い時間帯の取引が取りきれないケースがあったため23:10に変更）
  */
 const runDailyPosImportAndPlanNextDay = () => {
   let ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -390,6 +391,63 @@ const promptAndImportSmaregiActuals = () => {
   importSmaregiDailyActuals_(dateStr, store);
 };
 
+/**
+ * 開始日〜本日を1日ずつ importSmaregiDailyActuals_ で取り直す（取得漏れの手当て用）。
+ * 例: 取得トリガーの時刻変更前に取りきれていなかった日を、開始日を指定してまとめて再取得する。
+ * 対象店舗は promptAndImportSmaregiActuals と同じく予算・実績 D1 の選択に従う。
+ * 1日ごとにAPIを叩き直すため、対象日数が多いと実行時間がかかる（GASの実行時間上限に注意）。
+ */
+const promptAndBackfillSmaregiActuals = () => {
+  let ss = SpreadsheetApp.getActiveSpreadsheet();
+  let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  let store = resolveSelectedSmaregiStore_(budgetSheet);
+
+  let ui = SpreadsheetApp.getUi();
+  let today = formatJstDate_(new Date());
+  let res = ui.prompt(
+    "スマレジ実績 再取得（開始日〜本日を1日ずつ）",
+    `対象店舗: ${store.storeName || store.storeId}\n開始日を yyyy-MM-dd で入力してください（終了日は本日 ${today} 固定）`,
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (res.getSelectedButton() !== ui.Button.OK) return;
+
+  let input = String(res.getResponseText() || "").trim();
+  if (!input || isNaN(new Date(`${input}T12:00:00`).getTime())) {
+    ui.alert(`日付の形式が正しくありません: ${input}`);
+    return;
+  }
+  if (input > today) {
+    ui.alert(`開始日は本日（${today}）以前にしてください。`);
+    return;
+  }
+
+  runSmaregiBackfillActuals_(input, today, store);
+};
+
+/** startStr〜endStr（両端含む・yyyy-MM-dd）を1日ずつ再取得。1日分の失敗は握りつぶさず記録し、次の日へ続行する */
+const runSmaregiBackfillActuals_ = (startStr, endStr, store) => {
+  let succeeded = [];
+  let failed = [];
+  let cursor = startStr;
+  while (cursor <= endStr) {
+    try {
+      importSmaregiDailyActuals_(cursor, store);
+      succeeded.push(cursor);
+    } catch (err) {
+      failed.push(`${cursor}: ${err.message}`);
+      Logger.log(`[スマレジ再取得] ${cursor} 失敗: ${err.message}`);
+    }
+    Utilities.sleep(300);
+    cursor = addDaysToDateStr_(cursor, 1);
+  }
+
+  notifyUser(
+    `スマレジ実績 再取得完了 [${store.storeName || store.storeId}] ${startStr}〜${endStr}: 成功${succeeded.length}日`
+    + (failed.length > 0 ? ` / 失敗${failed.length}日（${failed.join(", ")}）` : ""),
+    "スマレジ再取得"
+  );
+};
+
 const SMAREGI_DAILY_TRIGGER_HANDLER_ = "runDailyPosImportAndPlanNextDay";
 /** 過去バージョンのトリガーハンドラ名（残っていたら置き換える） */
 const SMAREGI_DAILY_TRIGGER_LEGACY_HANDLERS_ = ["runSmaregiDailyAutoImport"];
@@ -405,9 +463,9 @@ const setupSmaregiDailyTrigger = () => {
     }
   });
 
-  ScriptApp.newTrigger(SMAREGI_DAILY_TRIGGER_HANDLER_).timeBased().everyDays(1).atHour(22).nearMinute(45).create();
+  ScriptApp.newTrigger(SMAREGI_DAILY_TRIGGER_HANDLER_).timeBased().everyDays(1).atHour(23).nearMinute(10).create();
   notifyUser(
-    "スマレジ日次自動取得トリガーを設定しました（毎日22:45ごろ、当日分の実績取得→翌日の仕込み・発注計算まで自動実行）。"
+    "スマレジ日次自動取得トリガーを設定しました（毎日23:10ごろ、当日分の実績取得→翌日の仕込み・発注計算まで自動実行）。"
     + (removed > 0 ? `既存トリガー${removed}件を置き換えました。` : "")
   );
 };
