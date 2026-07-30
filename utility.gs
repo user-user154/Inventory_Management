@@ -1990,7 +1990,7 @@ const ORDER_SHEET_MANUAL_INPUT = {
 
 /** 指示書 O2:Q15 の見出しとプルダウンを整備 */
 const setupOrderSheetManualInputArea = (sheet) => {
-  if (!sheet || sheet.getName() !== SHEET_NAMES.ORDER_FORM) return;
+  if (!sheet || !isOrderFormSheetName_(sheet.getName())) return;
 
   let cfg = ORDER_SHEET_MANUAL_INPUT;
   let props = PropertiesService.getScriptProperties();
@@ -2068,7 +2068,7 @@ const syncOrderSheetManualInputUnits_ = (e) => {
   if (!e || !e.range) return;
   let range = e.range;
   let sheet = range.getSheet();
-  if (!sheet || sheet.getName() !== SHEET_NAMES.ORDER_FORM) return;
+  if (!sheet || !isOrderFormSheetName_(sheet.getName())) return;
 
   let cfg = ORDER_SHEET_MANUAL_INPUT;
   let editedStartCol = range.getColumn();
@@ -2292,7 +2292,7 @@ const setupBudgetStartDateDropdown_ = (budgetSheet) => {
 
 /** 指示書 A1 プルダウンと B1 チェックボックスを整備 */
 const setupOrderSheetActionControls_ = (sheet) => {
-  if (!sheet || sheet.getName() !== SHEET_NAMES.ORDER_FORM) return;
+  if (!sheet || !isOrderFormSheetName_(sheet.getName())) return;
 
   let props = PropertiesService.getScriptProperties();
   props.setProperty(CHECKBOX_SKIP_PROPS_.ORDER_FORM, "1");
@@ -2322,10 +2322,12 @@ const setupOrderSheetActionControls_ = (sheet) => {
 /** 旧トリガー列のチェックボックスをオフ（移行用） */
 const clearLegacySheetTriggerCheckboxes_ = (sheet) => {
   if (!sheet) return;
-  let cols = LEGACY_TRIGGER_CHECKBOX_COLS_[sheet.getName()];
+  let parsed = parseStoreSheetName_(sheet.getName());
+  let legacyKey = parsed ? parsed.baseName : sheet.getName();
+  let cols = LEGACY_TRIGGER_CHECKBOX_COLS_[legacyKey];
   if (!cols || cols.length === 0) return;
 
-  let skipKey = sheet.getName() === SHEET_NAMES.ORDER_FORM
+  let skipKey = legacyKey === SHEET_NAMES.ORDER_FORM
     ? CHECKBOX_SKIP_PROPS_.ORDER_FORM
     : CHECKBOX_SKIP_PROPS_.BUDGET_ACTUAL;
   let props = PropertiesService.getScriptProperties();
@@ -2740,7 +2742,11 @@ const outputToOrderSheet = (sheet, todayResults, ctx) => {
 };
 
 /** シミュレーション直後の AI 予測値を保存（I1 確定コミット時の比較用） */
-const saveOrderSheetAiSnapshot_ = (orderDate, dayForSheet, ctx) => {
+/**
+ * @param {string} [storeName] 店舗別シート運用時の店舗名（プロパティキーの衝突防止用）。
+ *   未指定（従来の単一店舗運用）なら店舗名なしのキーのまま。
+ */
+const saveOrderSheetAiSnapshot_ = (orderDate, dayForSheet, ctx, storeName) => {
   if (!orderDate || !dayForSheet) return;
   let dateStr = Utilities.formatDate(new Date(orderDate), "JST", "yyyy-MM-dd");
   let snapshot = {
@@ -2770,15 +2776,23 @@ const saveOrderSheetAiSnapshot_ = (orderDate, dayForSheet, ctx) => {
   });
 
   PropertiesService.getScriptProperties().setProperty(
-    AI_SNAPSHOT_PROP_PREFIX + dateStr,
+    buildAiSnapshotPropKey_(dateStr, storeName),
     JSON.stringify(snapshot)
   );
 };
 
-/** 保存済み AI 予測スナップショットを読み込む */
-const loadOrderSheetAiSnapshot_ = (dateStr) => {
+/** 店舗名がある場合はプロパティキーに含める（店舗別シート運用時の衝突防止。全店舗共有のスクリプトプロパティのため） */
+const buildAiSnapshotPropKey_ = (dateStr, storeName) => {
+  return storeName ? `${AI_SNAPSHOT_PROP_PREFIX}${storeName}_${dateStr}` : `${AI_SNAPSHOT_PROP_PREFIX}${dateStr}`;
+};
+
+/**
+ * 保存済み AI 予測スナップショットを読み込む
+ * @param {string} [storeName] saveOrderSheetAiSnapshot_ と同じ店舗名を渡すこと
+ */
+const loadOrderSheetAiSnapshot_ = (dateStr, storeName) => {
   if (!dateStr) return null;
-  let raw = PropertiesService.getScriptProperties().getProperty(AI_SNAPSHOT_PROP_PREFIX + dateStr);
+  let raw = PropertiesService.getScriptProperties().getProperty(buildAiSnapshotPropKey_(dateStr, storeName));
   if (!raw) return null;
   try {
     return JSON.parse(raw);

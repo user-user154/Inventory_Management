@@ -45,7 +45,7 @@ const handleSpreadsheetEdit_ = (e) => {
     if (!sheet) return;
     let sheetName = sheet.getName();
 
-    if (sheetName === SHEET_NAMES.ORDER_FORM) {
+    if (isOrderFormSheetName_(sheetName)) {
       // 手動入力エリアでは O列の選択項目に応じた単位自動入力のみ実行する。
       if (isOrderSheetManualInputEdit_(e)) {
         syncOrderSheetManualInputUnits_(e);
@@ -80,17 +80,21 @@ const dispatchOrderSheetAction_ = (e, sheet) => {
     return;
   }
 
+  // 編集された指示書タブ自身から店舗コンテキストを解決する（ss.getActiveSheet() に頼らない）。
+  let storeSheets = resolveStoreSheetsForSheet_(sheet);
+
   runCheckboxAction_(sheet, ORDER_SHEET_B1_TRIGGER_, () => {
-    let result = actionFn();
+    let result = actionFn(storeSheets);
     if (menuItem.action === "runWeeklyFoodCostRatioPipeline" && result) {
       notifyUser(result.message || "週次原価率の処理が完了しました", menuItem.label);
     }
   }, menuItem.label, CHECKBOX_SKIP_PROPS_.ORDER_FORM);
 };
 
-/** メニュー・手動実行用: D2 と A5〜 から曜日列を一括更新 */
+/** メニュー・手動実行用: D2 と A5〜 から曜日列を一括更新（対象店舗のタブを開いてから実行） */
 function syncBudgetWeekdaysFromD2() {
-  let sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  let storeSheets = resolveStoreSheetsFromActiveSheet_();
+  let sheet = storeSheets.budgetSheet;
   if (!sheet) {
     notifyUser(`「${SHEET_NAMES.BUDGET_ACTUAL}」シートが見つかりません。`, "曜日更新");
     return;
@@ -105,7 +109,7 @@ function syncBudgetWeekdaysFromD2() {
 
 /** 予算・実績シートの B5 以降へ曜日を自動入力（全行）。年月は D2 参照 */
 const fillBudgetWeekdaysFromStartDate = (sheet) => {
-  if (!sheet || sheet.getName() !== SHEET_NAMES.BUDGET_ACTUAL) return;
+  if (!sheet || !isBudgetActualSheetName_(sheet.getName())) return;
   let lastRow = sheet.getLastRow();
   if (lastRow < 5) return;
   fillBudgetWeekdaysForRows_(sheet, 5, lastRow - 4);
@@ -113,7 +117,7 @@ const fillBudgetWeekdaysFromStartDate = (sheet) => {
 
 /** 指定行だけ A列の日(1〜31) → B列曜日を更新 */
 const fillBudgetWeekdaysForRows_ = (sheet, startRow, numRows) => {
-  if (!sheet || sheet.getName() !== SHEET_NAMES.BUDGET_ACTUAL) return;
+  if (!sheet || !isBudgetActualSheetName_(sheet.getName())) return;
   if (numRows <= 0) return;
 
   let ym = findBudgetYearMonthFromD2_(sheet);
@@ -169,13 +173,15 @@ const parseDateValue_ = (val) => {
 };
 
 /**
- * POSデータ_生 → POSデータ_整形後
+ * POSデータ_生 → POSデータ_整形後（対象店舗のタブを開いてから実行。チェックボックス経由なら自動解決）
  * 商品名クレンジング → 純売上>0（例外あり）→ 税込→税抜 → 統一商品名で合算 → 純売上降順
+ * @param {object} [storeSheets] resolveStoreSheetsFromActiveSheet_ 等で解決済みの店舗別シート一式
  */
-const formatPosRawToClean = () => {
+const formatPosRawToClean = (storeSheets) => {
   let ss = SpreadsheetApp.getActiveSpreadsheet();
-  let rawSheet = ss.getSheetByName(SHEET_NAMES.POS_RAW);
-  let cleanSheet = ss.getSheetByName(SHEET_NAMES.POS_CLEAN);
+  storeSheets = storeSheets || resolveStoreSheetsFromActiveSheet_(ss);
+  let rawSheet = storeSheets.posRawSheet;
+  let cleanSheet = storeSheets.posCleanSheet;
   if (!rawSheet) {
     throw new Error(`「${SHEET_NAMES.POS_RAW}」シートが見つかりません。`);
   }
@@ -575,10 +581,15 @@ const writePosCleanSheet = (cleanSheet, rows) => {
 
 /**
  * 確定コミット: バックログへ最終反映 + 手動調整を AI予測手動調整ログ へ出力
+ * （対象店舗のタブを開いてから実行。チェックボックス経由なら自動解決）
+ * バックログ・AI予測手動調整ログは店舗共有シートのまま（日付のみで行を置換するため、
+ * 複数店舗が同日に確定コミットすると互いの行を上書きする可能性がある点に注意）
+ * @param {object} [storeSheets] resolveStoreSheetsFromActiveSheet_ 等で解決済みの店舗別シート一式
  */
-const commitOrderSheetToBacklogAndLog = () => {
+const commitOrderSheetToBacklogAndLog = (storeSheets) => {
   let ss = SpreadsheetApp.getActiveSpreadsheet();
-  let orderSheet = ss.getSheetByName(SHEET_NAMES.ORDER_FORM);
+  storeSheets = storeSheets || resolveStoreSheetsFromActiveSheet_(ss);
+  let orderSheet = storeSheets.orderSheet;
   if (!orderSheet) {
     throw new Error(`「${SHEET_NAMES.ORDER_FORM}」シートが見つかりません。`);
   }
@@ -593,7 +604,7 @@ const commitOrderSheetToBacklogAndLog = () => {
     throw new Error("指示書 B2 に有効な日付を入力してください。");
   }
   let dateStr = formatJstDate_(rawDate);
-  let aiSnapshot = loadOrderSheetAiSnapshot_(dateStr);
+  let aiSnapshot = loadOrderSheetAiSnapshot_(dateStr, storeSheets.storeName);
   let rawMaster = loadRawMaterialMasterCached_(ss);
 
   let backlogRows = buildCommittedBacklogRows_(dateStr, orderSheet, aiSnapshot, rawMaster);
