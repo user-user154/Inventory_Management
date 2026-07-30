@@ -165,7 +165,8 @@ const resolveSelectedSmaregiStore_ = (budgetSheet) => {
 };
 
 /**
- * スマレジの店舗一覧を取得し、予算・実績 C1(見出し)/D1(プルダウン) を整備する（メニューから手動実行）
+ * スマレジの店舗一覧を取得し、対象店舗（アクティブなタブ）の予算・実績 C1(見出し)/D1(プルダウン) を
+ * 整備する（メニューから手動実行。対象店舗の予算・実績等のタブを開いてから実行すること）。
  * D1 の選択肢は "storeId: storeName" 形式。既存の選択値が一覧に残っていればそのまま維持する。
  */
 const setupSmaregiStoreDropdown = () => {
@@ -176,7 +177,7 @@ const setupSmaregiStoreDropdown = () => {
   }
 
   let ss = SpreadsheetApp.getActiveSpreadsheet();
-  let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  let budgetSheet = resolveStoreSheetsFromActiveSheet_(ss).budgetSheet;
   if (!budgetSheet) {
     throw new Error(`「${SHEET_NAMES.BUDGET_ACTUAL}」シートが見つかりません。`);
   }
@@ -305,7 +306,14 @@ const writeActualSalesLogForDate_ = (sheet, dateStr, storeId, aggregatedRows) =>
  * 実際のPOS集計とズレるため、合計は取引単位でまとめてから1回だけ税抜換算する。
  * 商品別の内訳（実績出数ログ用の数量・按分金額）は引き続き明細行から作る。
  */
-const importSmaregiDailyActuals_ = (dateStr, store) => {
+/**
+ * @param {string} dateStr
+ * @param {object} store {storeId, storeName}
+ * @param {Sheet} [budgetSheetOverride] 明示的に対象店舗の予算・実績シートを指定する場合
+ *   （夜間トリガーなど「アクティブシート」が無い文脈から店舗ループで呼ぶ用）。
+ *   未指定時はアクティブシートから解決する（メニューからの手動実行用）。
+ */
+const importSmaregiDailyActuals_ = (dateStr, store, budgetSheetOverride) => {
   let transactions = fetchSmaregiTransactions_(dateStr, store.storeId);
 
   let details = [];
@@ -325,7 +333,7 @@ const importSmaregiDailyActuals_ = (dateStr, store) => {
   writeActualSalesLogForDate_(logSheet, dateStr, store.storeId, aggregated);
 
   let totalAmount = convertPosSalesToExTax(totalIncTax);
-  let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  let budgetSheet = budgetSheetOverride || resolveStoreSheetsFromActiveSheet_(ss).budgetSheet;
   let budgetWritten = budgetSheet ? writeBudgetRatioAtDate_(budgetSheet, dateStr, "実績", totalAmount) : false;
 
   notifyUser(
@@ -336,41 +344,67 @@ const importSmaregiDailyActuals_ = (dateStr, store) => {
   return { dateStr: dateStr, storeId: store.storeId, productCount: aggregated.length, totalAmount: totalAmount };
 };
 
-/** 当日分を取得（メニューからの手動再取得用。営業終了間際までの実績を取り込む） */
+/** 当日分を取得（メニューからの手動再取得用。営業終了間際までの実績を取り込む。対象店舗のタブを開いてから実行） */
 const runSmaregiDailyAutoImport = () => {
-  let budgetSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  let budgetSheet = resolveStoreSheetsFromActiveSheet_().budgetSheet;
   let store = resolveSelectedSmaregiStore_(budgetSheet);
-  importSmaregiDailyActuals_(formatJstDate_(new Date()), store);
+  importSmaregiDailyActuals_(formatJstDate_(new Date()), store, budgetSheet);
 };
 
 /**
- * 毎晩23:10ごろの時間トリガー本体: 当日分のスマレジ実績を取り込み、
- * その実績を使って翌日の仕込み・発注指示を計算し指示書へ反映する。
- * 例: 23:10に7/1の実績を取込→指示書B2を7/2に設定→7/2の計算を実行。
+ * 毎晩23:10ごろの時間トリガー本体: スマレジの全店舗をループし、各店舗ごとに
+ * 当日分の実績を取り込み、その実績を使って翌日の仕込み・発注指示を計算し
+ * その店舗の指示書へ反映する。例: 23:10に7/1の実績を取込→指示書B2を7/2に設定→7/2の計算を実行。
  * （22:45だと当日の遅い時間帯の取引が取りきれないケースがあったため23:10に変更）
+ *
+ * 時間トリガーには「アクティブシート」という概念が無いため、
+ * resolveStoreSheetsFromActiveSheet_ には頼らず、店舗ごとに明示的にシートを解決する。
+ * 「発注管理」→「店舗別シートを作成・整備」を先に実行し、各店舗の4シートを用意しておく必要がある
+ * （未作成の店舗はスキップしてログに残し、他店舗の処理は継続する）。
  */
 const runDailyPosImportAndPlanNextDay = () => {
   let ss = SpreadsheetApp.getActiveSpreadsheet();
-  let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
-  let store = resolveSelectedSmaregiStore_(budgetSheet);
+  let stores = getSmaregiStores_();
+  if (!stores || stores.length === 0) {
+    notifyUser("スマレジに店舗が1件も見つかりませんでした。");
+    return;
+  }
 
   let today = formatJstDate_(new Date());
-  importSmaregiDailyActuals_(today, store);
-
-  let orderSheet = ss.getSheetByName(SHEET_NAMES.ORDER_FORM);
-  if (!orderSheet) {
-    throw new Error(`「${SHEET_NAMES.ORDER_FORM}」シートが見つかりません。`);
-  }
   let tomorrow = addDaysToDateStr_(today, 1);
-  orderSheet.getRange("B2").setValue(new Date(`${tomorrow}T12:00:00`));
+  let succeeded = [];
+  let failed = [];
 
-  runSimulationPipeline();
+  stores.forEach((store) => {
+    let storeName = String(store.storeName || "").trim();
+    try {
+      if (!storeName) throw new Error(`storeId=${store.storeId} は店舗名が空です`);
+      let storeSheets = resolveStoreSheetsByStoreName_(ss, storeName);
+      if (!storeSheets.orderSheet || !storeSheets.budgetSheet) {
+        throw new Error(`店舗別シート未作成です（「発注管理」→「店舗別シートを作成・整備」を先に実行してください）`);
+      }
+
+      importSmaregiDailyActuals_(today, store, storeSheets.budgetSheet);
+      storeSheets.orderSheet.getRange("B2").setValue(new Date(`${tomorrow}T12:00:00`));
+      runSimulationPipeline(storeSheets);
+      succeeded.push(storeName);
+    } catch (err) {
+      failed.push(`${storeName || store.storeId}: ${err.message}`);
+      Logger.log(`[日次自動実行] 店舗「${storeName || store.storeId}」失敗: ${err.message}`);
+    }
+  });
+
+  notifyUser(
+    `日次自動実行完了: 成功${succeeded.length}店舗（${succeeded.join(", ")}）`
+    + (failed.length > 0 ? ` / 失敗${failed.length}店舗（${failed.join(" / ")}）` : ""),
+    "日次自動実行"
+  );
 };
 
-/** 日付を指定して手動再取得（空欄なら本日、対象店舗は予算・実績 D1 の選択に従う） */
+/** 日付を指定して手動再取得（空欄なら本日、対象店舗は開いているタブの予算・実績 D1 の選択に従う） */
 const promptAndImportSmaregiActuals = () => {
   let ss = SpreadsheetApp.getActiveSpreadsheet();
-  let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  let budgetSheet = resolveStoreSheetsFromActiveSheet_(ss).budgetSheet;
   let store = resolveSelectedSmaregiStore_(budgetSheet);
 
   let ui = SpreadsheetApp.getUi();
@@ -388,18 +422,18 @@ const promptAndImportSmaregiActuals = () => {
     ui.alert(`日付の形式が正しくありません: ${input}`);
     return;
   }
-  importSmaregiDailyActuals_(dateStr, store);
+  importSmaregiDailyActuals_(dateStr, store, budgetSheet);
 };
 
 /**
  * 開始日〜指定期日（未入力なら本日）を1日ずつ importSmaregiDailyActuals_ で取り直す（取得漏れの手当て用）。
  * 例: 取得トリガーの時刻変更前に取りきれていなかった期間を、開始日・終了日を指定してまとめて再取得する。
- * 対象店舗は promptAndImportSmaregiActuals と同じく予算・実績 D1 の選択に従う。
+ * 対象店舗は promptAndImportSmaregiActuals と同じく開いているタブの予算・実績 D1 の選択に従う。
  * 1日ごとにAPIを叩き直すため、対象日数が多いと実行時間がかかる（GASの実行時間上限に注意）。
  */
 const promptAndBackfillSmaregiActuals = () => {
   let ss = SpreadsheetApp.getActiveSpreadsheet();
-  let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  let budgetSheet = resolveStoreSheetsFromActiveSheet_(ss).budgetSheet;
   let store = resolveSelectedSmaregiStore_(budgetSheet);
 
   let ui = SpreadsheetApp.getUi();
@@ -435,17 +469,17 @@ const promptAndBackfillSmaregiActuals = () => {
     return;
   }
 
-  runSmaregiBackfillActuals_(startInput, endStr, store);
+  runSmaregiBackfillActuals_(startInput, endStr, store, budgetSheet);
 };
 
 /** startStr〜endStr（両端含む・yyyy-MM-dd）を1日ずつ再取得。1日分の失敗は握りつぶさず記録し、次の日へ続行する */
-const runSmaregiBackfillActuals_ = (startStr, endStr, store) => {
+const runSmaregiBackfillActuals_ = (startStr, endStr, store, budgetSheet) => {
   let succeeded = [];
   let failed = [];
   let cursor = startStr;
   while (cursor <= endStr) {
     try {
-      importSmaregiDailyActuals_(cursor, store);
+      importSmaregiDailyActuals_(cursor, store, budgetSheet);
       succeeded.push(cursor);
     } catch (err) {
       failed.push(`${cursor}: ${err.message}`);

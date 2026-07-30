@@ -14,12 +14,14 @@ const STOCK_SNAPSHOT_HEADERS_ = ["棚卸日", "商品名", "種別", "数量", "
 
 /**
  * 週次原価率パイプライン（指示書 A1/B1 から呼び出し）
+ * @param {object} [storeSheets] 対象店舗の4シート一式（未指定時はアクティブシートから解決）
  * @return {{ updated: boolean, weeklyRatio: number|null, message: string }}
  */
-const runWeeklyFoodCostRatioPipeline = () => {
+const runWeeklyFoodCostRatioPipeline = (storeSheets) => {
   let ss = SpreadsheetApp.getActiveSpreadsheet();
+  storeSheets = storeSheets || resolveStoreSheetsFromActiveSheet_(ss);
   let stockSheet = ss.getSheetByName(SHEET_NAMES.STOCK_TAKING);
-  let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  let budgetSheet = storeSheets.budgetSheet;
   if (!stockSheet || !budgetSheet) {
     return { updated: false, weeklyRatio: null, message: "棚卸し表または予算・実績がありません" };
   }

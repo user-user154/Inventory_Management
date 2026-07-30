@@ -10,19 +10,20 @@
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu("発注管理")
-    .addItem("予算・実績の曜日を更新", "syncBudgetWeekdaysFromD2")
+    .addItem("予算・実績の曜日を更新（対象店舗のタブを開いてから実行）", "syncBudgetWeekdaysFromD2")
     .addSeparator()
-    .addItem("スマレジ店舗一覧を更新（予算・実績 D1）", "setupSmaregiStoreDropdown")
-    .addItem("スマレジ実績を取得（当日分）", "runSmaregiDailyAutoImport")
-    .addItem("スマレジ実績を取得（日付指定）", "promptAndImportSmaregiActuals")
-    .addItem("スマレジ実績を再取得（期間を1日ずつ）", "promptAndBackfillSmaregiActuals")
-    .addItem("実績取得→翌日の仕込み・発注計算を今すぐ実行", "runDailyPosImportAndPlanNextDay")
-    .addItem("スマレジ日次自動取得トリガーを設定", "setupSmaregiDailyTrigger")
+    .addItem("店舗別シートを作成・整備（予算実績/指示書/POS生/POS整形後）", "setupPerStoreOperationSheets")
+    .addItem("スマレジ店舗一覧を更新（対象店舗の予算・実績 D1）", "setupSmaregiStoreDropdown")
+    .addItem("スマレジ実績を取得（当日分・対象店舗のタブを開いてから実行）", "runSmaregiDailyAutoImport")
+    .addItem("スマレジ実績を取得（日付指定・対象店舗のタブを開いてから実行）", "promptAndImportSmaregiActuals")
+    .addItem("スマレジ実績を再取得（期間を1日ずつ・対象店舗のタブを開いてから実行）", "promptAndBackfillSmaregiActuals")
+    .addItem("実績取得→翌日の仕込み・発注計算を今すぐ実行（全店舗）", "runDailyPosImportAndPlanNextDay")
+    .addItem("スマレジ日次自動取得トリガーを設定（全店舗を毎晩自動処理）", "setupSmaregiDailyTrigger")
     .addSeparator()
-    .addItem("Infomart認可URLを発行（予算・実績 D1で選択中の店舗）", "promptInfomartAuthorizationUrl")
-    .addItem("Infomart請求書を取得（当日分）", "runInfomartInvoiceImportToday")
-    .addItem("Infomart請求書を取得（日付指定）", "promptAndImportInfomartInvoices")
-    .addItem("Infomart受発注データを取得（日付範囲指定）", "promptAndImportInfomartOrderDelivery")
+    .addItem("Infomart認可URLを発行（対象店舗のタブを開いてから実行）", "promptInfomartAuthorizationUrl")
+    .addItem("Infomart請求書を取得（当日分・対象店舗のタブを開いてから実行）", "runInfomartInvoiceImportToday")
+    .addItem("Infomart請求書を取得（日付指定・対象店舗のタブを開いてから実行）", "promptAndImportInfomartInvoices")
+    .addItem("Infomart受発注データを取得（日付範囲指定・対象店舗のタブを開いてから実行）", "promptAndImportInfomartOrderDelivery")
     .addItem("onEdit連携トリガーを設定（長時間実行用・任意）", "setupOnEditInstallableTrigger")
     .addItem("祝日キャッシュを更新（1年分取得）", "runRefreshJapaneseHolidayCache")
     .addSeparator()
@@ -40,19 +41,19 @@ function onOpen() {
     Logger.log(`[onOpen] インストール型 onEdit の確認をスキップ: ${err.message}`);
   }
 
-  let orderSheet = ss.getSheetByName(SHEET_NAMES.ORDER_FORM);
-  if (orderSheet) {
-    setupOrderSheetActionControls_(orderSheet);
-    setupOrderSheetManualInputArea(orderSheet);
-    resetStuckOrderSheetCheckboxIfNeeded_(orderSheet);
-    clearLegacySheetTriggerCheckboxes_(orderSheet);
-  }
-
-  let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
-  if (budgetSheet) {
-    clearLegacySheetTriggerCheckboxes_(budgetSheet);
-    setupBudgetStartDateDropdown_(budgetSheet);
-  }
+  // 元の固定名シート＋店舗別シートのすべてに対して初期化する（店舗別シート導入前の単一店舗運用にも対応）。
+  ss.getSheets().forEach((sheet) => {
+    let name = sheet.getName();
+    if (isOrderFormSheetName_(name)) {
+      setupOrderSheetActionControls_(sheet);
+      setupOrderSheetManualInputArea(sheet);
+      resetStuckOrderSheetCheckboxIfNeeded_(sheet);
+      clearLegacySheetTriggerCheckboxes_(sheet);
+    } else if (isBudgetActualSheetName_(name)) {
+      clearLegacySheetTriggerCheckboxes_(sheet);
+      setupBudgetStartDateDropdown_(sheet);
+    }
+  });
 }
 
 /**
@@ -65,16 +66,21 @@ function runRefreshJapaneseHolidayCache() {
   notifyUser(`祝日キャッシュを更新しました: ${cache.rangeStart}〜${cache.rangeEnd}（${cache.dates.length}件）`);
 }
 
-const runSimulationPipeline = () => {
+/**
+ * @param {object} [storeSheets] 対象店舗の4シート一式（resolveStoreSheetsFromActiveSheet_ 等で解決済み）。
+ *   未指定時はアクティブシートから解決する（メニュー・チェックボックス以外からの直接実行用）。
+ */
+const runSimulationPipeline = (storeSheets) => {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
+  storeSheets = storeSheets || resolveStoreSheetsFromActiveSheet_(ss);
   let runStarted = Date.now();
-  
+
   // 1. シミュレーション条件の取得（指示書シートから読み込む）
-  let orderSheet = ss.getSheetByName(SHEET_NAMES.ORDER_FORM);
+  let orderSheet = storeSheets.orderSheet;
   if (!orderSheet) {
     throw new Error(`「${SHEET_NAMES.ORDER_FORM}」シートが見つかりません。`);
   }
-  
+
   let configBlock = orderSheet.getRange("B2:F3").getValues();
   let rawDate = configBlock[0][0]; // B2 基準日
   let b3Days = configBlock[1][0]; // B3 期間フォールバック
@@ -85,7 +91,7 @@ const runSimulationPipeline = () => {
   }
 
   let orderDate = new Date(rawDate); // 指示書 B2（計算したい基準日）
-  let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  let budgetSheet = storeSheets.budgetSheet;
   let period = "当日"; // 予算・実績 D1 は店舗選択に転用したため、期間は常に当日固定
   let stockSheet = ss.getSheetByName(SHEET_NAMES.STOCK_TAKING);
   let inventoryVal = stockSheet ? stockSheet.getRange("B1").getValue() : null;
@@ -115,7 +121,8 @@ const runSimulationPipeline = () => {
   let ctx = buildSimulationContext(simStartDate, simDays, period, orderDate, {
     vendorData: vendorData,
     inventoryDateStr: inventoryDate ? formatJstDate_(inventoryDate) : null,
-    averageSpend: averageSpend
+    averageSpend: averageSpend,
+    storeSheets: storeSheets
   });
   ctx.orderDate = orderDate;
 
@@ -138,7 +145,7 @@ const runSimulationPipeline = () => {
       inProcess: dayOutForSheet.inProcess,
       orders: collectOrderSheetOrdersForDay_(ctx, simulationResults, dayIdx)
     };
-    saveOrderSheetAiSnapshot_(orderDate, dayForSheet, ctx);
+    saveOrderSheetAiSnapshot_(orderDate, dayForSheet, ctx, storeSheets.storeName);
     outputToOrderSheet(orderSheet, dayForSheet, ctx);
   }
 
