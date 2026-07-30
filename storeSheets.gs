@@ -16,9 +16,15 @@
  * リスクがあったため、他の運用シートと同じ店舗別タブ方式に統一した。
  *
  * 対象外（分割しない・共有のまま）: レシピ表・中間レシピ表・原材料マスタ・歩留まりマスタ・
- * 名寄せマスタ・発注業者マスタ・棚卸し表（マスタ系）、実績出数ログ（既にstoreId列で対応済み）、
+ * 名寄せマスタ・発注業者マスタ、実績出数ログ（既にstoreId列で対応済み）、
  * 確定指示ログ（コード上どこからも参照されない未使用シート）、Infomart請求書ログ・
  * Infomart受発注ログ（店舗ごとの資格情報でAPIを取得し追記するだけのログのため共有のままで十分）。
+ *
+ * 棚卸し表は当初「共有マスタ」として設計したが、実運用では店舗ごとに別タブ
+ * （例:「棚卸し表_池袋西口店」）で棚卸しされている。ただし他の店舗別シートと違い、
+ * サフィックスがスマレジ店舗名の屋号を除いた拠点名のみ（「大衆焼肉コグマヤ池袋西口店」に対し
+ * 「池袋西口店」）のため、buildStoreSheetName_ の完全一致では解決できない。
+ * そのため resolveStockTakingSheet_ で専用に解決する（下記）。
  */
 
 /** 店舗別に分割するシートのベース名（constants.gs の SHEET_NAMES を参照） */
@@ -35,6 +41,31 @@ const STORE_SPLIT_SHEET_BASES_ = [
 /** 店舗別シート名を組み立てる（例: "予算・実績" + "渋谷店" → "予算・実績_渋谷店"） */
 const buildStoreSheetName_ = (baseName, storeName) => {
   return `${baseName}_${storeName}`;
+};
+
+/**
+ * 対象店舗の棚卸し表シートを解決する。
+ * 1. 「棚卸し表_<storeNameそのまま>」の完全一致（将来スマレジ店舗名と揃えた場合用）
+ * 2. 「棚卸し表_<拠点名>」で、storeName がその拠点名を含む場合（現状の実運用はこちら。
+ *    例: storeName="大衆焼肉コグマヤ池袋西口店" → シート「棚卸し表_池袋西口店」に一致）
+ * 3. どちらも無ければ元の固定名「棚卸し表」（未分割・単一店舗運用時の後方互換）
+ */
+const resolveStockTakingSheet_ = (ss, storeName) => {
+  let name = storeName ? String(storeName).trim() : "";
+  if (name) {
+    let exact = ss.getSheetByName(buildStoreSheetName_(SHEET_NAMES.STOCK_TAKING, name));
+    if (exact) return exact;
+
+    let prefix = SHEET_NAMES.STOCK_TAKING + "_";
+    let bySuffix = ss.getSheets().find((sheet) => {
+      let sheetName = sheet.getName();
+      if (sheetName.indexOf(prefix) !== 0) return false;
+      let suffix = sheetName.slice(prefix.length);
+      return suffix.length > 0 && name.indexOf(suffix) !== -1;
+    });
+    if (bySuffix) return bySuffix;
+  }
+  return ss.getSheetByName(SHEET_NAMES.STOCK_TAKING);
 };
 
 /**

@@ -710,10 +710,10 @@ const endOfMonthJst_ = (date) => {
   return new Date(date.getFullYear(), date.getMonth() + 1, 0);
 };
 
-/** 棚卸し表 B1 の日付（yyyy-MM-dd） */
-const getInventoryDateStrFromSheet_ = () => {
+/** 棚卸し表 B1 の日付（yyyy-MM-dd）。storeName 指定時は対象店舗の棚卸し表から解決する */
+const getInventoryDateStrFromSheet_ = (storeName) => {
   let ss = SpreadsheetApp.getActiveSpreadsheet();
-  let stockSheet = ss ? ss.getSheetByName(SHEET_NAMES.STOCK_TAKING) : null;
+  let stockSheet = ss ? resolveStockTakingSheet_(ss, storeName) : null;
   if (!stockSheet) return "";
   let inventoryVal = stockSheet.getRange("B1").getValue();
   if (!inventoryVal || isNaN(new Date(inventoryVal).getTime())) return "";
@@ -793,8 +793,8 @@ const resolveBacklogHistoricalKeepFrom_ = (ctx) => {
   return formatJstDate_(keepFrom);
 };
 
-const buildBacklogRetentionCtx_ = (referenceDateStr, inventoryDateStr) => {
-  let inv = inventoryDateStr || getInventoryDateStrFromSheet_() || referenceDateStr;
+const buildBacklogRetentionCtx_ = (referenceDateStr, inventoryDateStr, storeName) => {
+  let inv = inventoryDateStr || getInventoryDateStrFromSheet_(storeName) || referenceDateStr;
   return {
     inventoryDateStr: inv,
     targetDatesStr: [referenceDateStr || inv],
@@ -2947,7 +2947,7 @@ const shouldLogManualAdjustmentEntry_ = (entry) => {
 };
 
 /** 確定コミット時にバックログの指定日付行を差し替え（sheetは店舗別に解決済みのものを渡す） */
-const replaceBacklogRowsForDate_ = (sheet, dateStr, newRowsForDate) => {
+const replaceBacklogRowsForDate_ = (sheet, dateStr, newRowsForDate, storeName) => {
   if (!sheet) return 0;
 
   let meta = ensureBacklogSheetMeta_(sheet);
@@ -2969,7 +2969,7 @@ const replaceBacklogRowsForDate_ = (sheet, dateStr, newRowsForDate) => {
   }
 
   let combined = existing.concat(newRowsForDate || []);
-  let retentionCtx = buildBacklogRetentionCtx_(dateStr, getInventoryDateStrFromSheet_());
+  let retentionCtx = buildBacklogRetentionCtx_(dateStr, null, storeName);
   let merged = applyBacklogRetentionToRows_(combined, meta, retentionCtx);
 
   if (lastRow >= startRow) {

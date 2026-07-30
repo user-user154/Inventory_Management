@@ -684,7 +684,7 @@ const commitOrderSheetToBacklogAndLog = (storeSheets) => {
   let rawMaster = loadRawMaterialMasterCached_(ss);
 
   let backlogRows = buildCommittedBacklogRows_(dateStr, orderSheet, aiSnapshot, rawMaster);
-  let backlogCount = replaceBacklogRowsForDate_(backlogSheet, dateStr, backlogRows);
+  let backlogCount = replaceBacklogRowsForDate_(backlogSheet, dateStr, backlogRows, storeSheets.storeName);
 
   let entries = collectManualAdjustmentEntries(orderSheet, aiSnapshot, rawMaster);
   writeManualAdjustmentLogForDate(logSheet, dateStr, entries);

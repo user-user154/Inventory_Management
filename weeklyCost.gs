@@ -10,7 +10,13 @@
 const STOCK_SNAPSHOT_SHEET_ = "棚卸し履歴";
 const STOCK_TAKING_LAST_DATE_KEY_ = "STOCK_TAKING_LAST_DATE";
 const STOCK_TAKING_PREV_DATE_KEY_ = "STOCK_TAKING_PREV_DATE";
-const STOCK_SNAPSHOT_HEADERS_ = ["棚卸日", "商品名", "種別", "数量", "単位"];
+/** 棚卸し表と同じく店舗別タブのため、履歴シートは1枚共有のまま「店舗」列で区別する（実績出数ログと同じ方式） */
+const STOCK_SNAPSHOT_HEADERS_ = ["棚卸日", "店舗", "商品名", "種別", "数量", "単位"];
+
+/** 週次原価率の前回/今回棚卸し日プロパティキー（店舗別。全店舗共有のスクリプトプロパティのため店舗名を含める） */
+const buildStockTakingPropKey_ = (baseKey, storeName) => {
+  return storeName ? `${baseKey}_${storeName}` : baseKey;
+};
 
 /**
  * 週次原価率パイプライン（指示書 A1/B1 から呼び出し）
@@ -20,7 +26,8 @@ const STOCK_SNAPSHOT_HEADERS_ = ["棚卸日", "商品名", "種別", "数量", "
 const runWeeklyFoodCostRatioPipeline = (storeSheets) => {
   let ss = SpreadsheetApp.getActiveSpreadsheet();
   storeSheets = storeSheets || resolveStoreSheetsFromActiveSheet_(ss);
-  let stockSheet = ss.getSheetByName(SHEET_NAMES.STOCK_TAKING);
+  let storeName = storeSheets.storeName;
+  let stockSheet = resolveStockTakingSheet_(ss, storeName);
   let budgetSheet = storeSheets.budgetSheet;
   if (!stockSheet || !budgetSheet) {
     return { updated: false, weeklyRatio: null, message: "棚卸し表または予算・実績がありません" };
@@ -39,24 +46,26 @@ const runWeeklyFoodCostRatioPipeline = (storeSheets) => {
   }
 
   let props = PropertiesService.getScriptProperties();
-  let lastDateStr = props.getProperty(STOCK_TAKING_LAST_DATE_KEY_) || "";
-  let prevDateStr = props.getProperty(STOCK_TAKING_PREV_DATE_KEY_) || "";
+  let lastDateKey = buildStockTakingPropKey_(STOCK_TAKING_LAST_DATE_KEY_, storeName);
+  let prevDateKey = buildStockTakingPropKey_(STOCK_TAKING_PREV_DATE_KEY_, storeName);
+  let lastDateStr = props.getProperty(lastDateKey) || "";
+  let prevDateStr = props.getProperty(prevDateKey) || "";
 
   if (!lastDateStr) {
-    saveStockSnapshotToHistory_(ss, currentDateStr, currentSnapshot);
-    props.setProperty(STOCK_TAKING_LAST_DATE_KEY_, currentDateStr);
+    saveStockSnapshotToHistory_(ss, currentDateStr, currentSnapshot, storeName);
+    props.setProperty(lastDateKey, currentDateStr);
     Logger.log(`[週次原価率] 初回棚卸しを記録: ${currentDateStr}`);
     return { updated: false, weeklyRatio: null, message: "初回棚卸しを記録しました（次回から週次原価率を算出）" };
   }
 
-  let period = resolveWeeklyCostPeriod_(currentDateStr, lastDateStr, prevDateStr, ss);
+  let period = resolveWeeklyCostPeriod_(currentDateStr, lastDateStr, prevDateStr, ss, storeName);
   if (!period) {
     return { updated: false, weeklyRatio: null, message: "棚卸日が前回より過去のためスキップしました" };
   }
   if (!period.prevSnapshot || isStockSnapshotEmpty_(period.prevSnapshot)) {
-    saveStockSnapshotToHistory_(ss, currentDateStr, currentSnapshot);
-    props.setProperty(STOCK_TAKING_PREV_DATE_KEY_, period.prevDateStr || "");
-    props.setProperty(STOCK_TAKING_LAST_DATE_KEY_, currentDateStr);
+    saveStockSnapshotToHistory_(ss, currentDateStr, currentSnapshot, storeName);
+    props.setProperty(prevDateKey, period.prevDateStr || "");
+    props.setProperty(lastDateKey, currentDateStr);
     return { updated: false, weeklyRatio: null, message: "前回棚卸しが無いため記録のみ行いました" };
   }
 
@@ -76,11 +85,11 @@ const runWeeklyFoodCostRatioPipeline = (storeSheets) => {
 
   writeWeeklyFoodCostRatioToBudget_(budgetSheet, rowInfo, breakdown.weeklyRatio, variance);
 
-  saveStockSnapshotToHistory_(ss, currentDateStr, currentSnapshot);
+  saveStockSnapshotToHistory_(ss, currentDateStr, currentSnapshot, storeName);
   if (currentDateStr !== lastDateStr) {
-    props.setProperty(STOCK_TAKING_PREV_DATE_KEY_, period.prevDateStr);
+    props.setProperty(prevDateKey, period.prevDateStr);
   }
-  props.setProperty(STOCK_TAKING_LAST_DATE_KEY_, currentDateStr);
+  props.setProperty(lastDateKey, currentDateStr);
 
   logWeeklyFoodCostBreakdown_(breakdown, variance);
 
@@ -149,8 +158,9 @@ const logWeeklyFoodCostBreakdown_ = (breakdown, variance) => {
  */
 const debugWeeklyFoodCostRatio = () => {
   let ss = SpreadsheetApp.getActiveSpreadsheet();
-  let stockSheet = ss.getSheetByName(SHEET_NAMES.STOCK_TAKING);
   let storeSheets = resolveStoreSheetsFromActiveSheet_(ss);
+  let storeName = storeSheets.storeName;
+  let stockSheet = resolveStockTakingSheet_(ss, storeName);
   let budgetSheet = storeSheets.budgetSheet;
   if (!stockSheet || !budgetSheet) {
     Logger.log("[診断] 棚卸し表または予算・実績がありません");
@@ -165,8 +175,8 @@ const debugWeeklyFoodCostRatio = () => {
   let currentDateStr = formatJstDate_(inventoryVal);
 
   let props = PropertiesService.getScriptProperties();
-  let lastDateStr = props.getProperty(STOCK_TAKING_LAST_DATE_KEY_) || "";
-  let prevDateStr = props.getProperty(STOCK_TAKING_PREV_DATE_KEY_) || "";
+  let lastDateStr = props.getProperty(buildStockTakingPropKey_(STOCK_TAKING_LAST_DATE_KEY_, storeName)) || "";
+  let prevDateStr = props.getProperty(buildStockTakingPropKey_(STOCK_TAKING_PREV_DATE_KEY_, storeName)) || "";
   if (!lastDateStr) {
     Logger.log("[診断] 初回棚卸しのみ記録済み。次回棚卸し後に週次原価率を算出できます。");
     return;
@@ -174,7 +184,7 @@ const debugWeeklyFoodCostRatio = () => {
 
   let ctx = loadCostCalcMasters_(ss);
   let currentSnapshot = loadStockTakingData(stockSheet, ctx.nameUnifyMap, ctx.rawMaster, ctx.preparationRecipes);
-  let period = resolveWeeklyCostPeriod_(currentDateStr, lastDateStr, prevDateStr, ss);
+  let period = resolveWeeklyCostPeriod_(currentDateStr, lastDateStr, prevDateStr, ss, storeName);
   if (!period || !period.prevSnapshot) {
     Logger.log("[診断] 前回棚卸しスナップショットがありません");
     return;
@@ -203,18 +213,18 @@ const debugWeeklyFoodCostRatio = () => {
   Logger.log("====================================");
 };
 
-const resolveWeeklyCostPeriod_ = (currentDateStr, lastDateStr, prevDateStr, ss) => {
+const resolveWeeklyCostPeriod_ = (currentDateStr, lastDateStr, prevDateStr, ss, storeName) => {
   let periodPrevDateStr;
   let periodPrevSnapshot;
 
   if (currentDateStr === lastDateStr) {
     periodPrevDateStr = prevDateStr;
     periodPrevSnapshot = periodPrevDateStr
-      ? loadStockSnapshotFromHistory_(ss, periodPrevDateStr)
+      ? loadStockSnapshotFromHistory_(ss, periodPrevDateStr, storeName)
       : null;
   } else if (currentDateStr > lastDateStr) {
     periodPrevDateStr = lastDateStr;
-    periodPrevSnapshot = loadStockSnapshotFromHistory_(ss, periodPrevDateStr);
+    periodPrevSnapshot = loadStockSnapshotFromHistory_(ss, periodPrevDateStr, storeName);
   } else {
     Logger.log(`[週次原価率] 過去日付スキップ: ${currentDateStr} < ${lastDateStr}`);
     return null;
@@ -356,18 +366,19 @@ const ensureStockSnapshotSheet_ = (ss) => {
   return sheet;
 };
 
-const saveStockSnapshotToHistory_ = (ss, dateStr, stockData) => {
+const saveStockSnapshotToHistory_ = (ss, dateStr, stockData, storeName) => {
   let sheet = ensureStockSnapshotSheet_(ss);
-  removeStockSnapshotRowsForDate_(sheet, dateStr);
+  removeStockSnapshotRowsForDate_(sheet, dateStr, storeName);
 
+  let store = storeName || "";
   let rows = [];
   Object.keys(stockData.rawStock || {}).forEach((name) => {
     let s = stockData.rawStock[name];
-    rows.push([dateStr, name, "raw", s.qty, s.unit]);
+    rows.push([dateStr, store, name, "raw", s.qty, s.unit]);
   });
   Object.keys(stockData.prepStock || {}).forEach((name) => {
     let s = stockData.prepStock[name];
-    rows.push([dateStr, name, "prep", s.qty, s.unit]);
+    rows.push([dateStr, store, name, "prep", s.qty, s.unit]);
   });
   if (rows.length === 0) return;
 
@@ -380,13 +391,15 @@ const saveStockSnapshotToHistory_ = (ss, dateStr, stockData) => {
   writeSheetRows(sheet, startRow, 1, rows);
 };
 
-const removeStockSnapshotRowsForDate_ = (sheet, dateStr) => {
+/** 対象日・対象店舗（店舗別タブのため、他店舗の同日分は残す）の行だけ削除 */
+const removeStockSnapshotRowsForDate_ = (sheet, dateStr, storeName) => {
   let lastRow = sheet.getLastRow();
   if (lastRow < 2) return;
 
+  let store = storeName || "";
   let data = sheet.getRange(2, 1, lastRow - 1, STOCK_SNAPSHOT_HEADERS_.length).getValues();
   let kept = data.filter((row) => {
-    return formatSheetDateToKey(row[0]) !== dateStr;
+    return !(formatSheetDateToKey(row[0]) === dateStr && String(row[1] || "") === store);
   });
   if (kept.length === data.length) return;
 
@@ -394,11 +407,12 @@ const removeStockSnapshotRowsForDate_ = (sheet, dateStr) => {
   if (kept.length > 0) writeSheetRows(sheet, 2, 1, kept);
 };
 
-const loadStockSnapshotFromHistory_ = (ss, dateStr) => {
+const loadStockSnapshotFromHistory_ = (ss, dateStr, storeName) => {
   let sheet = ss.getSheetByName(STOCK_SNAPSHOT_SHEET_);
   let lastRow = sheet ? sheet.getLastRow() : 0;
   if (!sheet || lastRow < 2) return null;
 
+  let store = storeName || "";
   let data = sheet.getRange(2, 1, lastRow - 1, STOCK_SNAPSHOT_HEADERS_.length).getValues();
   let rawStock = {};
   let prepStock = {};
@@ -406,13 +420,14 @@ const loadStockSnapshotFromHistory_ = (ss, dateStr) => {
 
   data.forEach((row) => {
     if (formatSheetDateToKey(row[0]) !== dateStr) return;
+    if (String(row[1] || "") !== store) return;
     found = true;
-    let name = String(row[1]).trim();
-    let qty = Number(row[3]);
-    let unit = String(row[4]).trim();
+    let name = String(row[2]).trim();
+    let qty = Number(row[4]);
+    let unit = String(row[5]).trim();
     if (!name || isNaN(qty)) return;
 
-    if (String(row[2]).trim() === "prep") {
+    if (String(row[3]).trim() === "prep") {
       mergeStockEntry_(prepStock, name, qty, unit);
     } else {
       mergeStockEntry_(rawStock, name, qty, unit);
@@ -441,10 +456,14 @@ const clearStockSnapshotHistory_ = (ss) => {
   }
 
   let props = PropertiesService.getScriptProperties();
-  let lastDate = props.getProperty(STOCK_TAKING_LAST_DATE_KEY_) || "";
-  let prevDate = props.getProperty(STOCK_TAKING_PREV_DATE_KEY_) || "";
-  props.deleteProperty(STOCK_TAKING_LAST_DATE_KEY_);
-  props.deleteProperty(STOCK_TAKING_PREV_DATE_KEY_);
+  let allProps = props.getProperties();
+  let lastDate = allProps[STOCK_TAKING_LAST_DATE_KEY_] || "";
+  let prevDate = allProps[STOCK_TAKING_PREV_DATE_KEY_] || "";
+  Object.keys(allProps).forEach((key) => {
+    if (key.indexOf(STOCK_TAKING_LAST_DATE_KEY_) === 0 || key.indexOf(STOCK_TAKING_PREV_DATE_KEY_) === 0) {
+      props.deleteProperty(key);
+    }
+  });
 
   return { clearedRows: clearedRows, lastDate: lastDate, prevDate: prevDate };
 };
