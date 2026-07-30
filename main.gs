@@ -12,7 +12,7 @@ function onOpen() {
     .createMenu("発注管理")
     .addItem("予算・実績の曜日を更新（対象店舗のタブを開いてから実行）", "syncBudgetWeekdaysFromD2")
     .addSeparator()
-    .addItem("店舗別シートを作成・整備（予算実績/指示書/POS生/POS整形後）", "setupPerStoreOperationSheets")
+    .addItem("店舗別シートを作成・整備（予算実績/指示書/POS生/POS整形後/バックログ/AI調整ログ/予測出数ログ）", "setupPerStoreOperationSheets")
     .addItem("スマレジ店舗一覧を更新（対象店舗の予算・実績 D1）", "setupSmaregiStoreDropdown")
     .addItem("スマレジ実績を取得（当日分・対象店舗のタブを開いてから実行）", "runSmaregiDailyAutoImport")
     .addItem("スマレジ実績を取得（日付指定・対象店舗のタブを開いてから実行）", "promptAndImportSmaregiActuals")
