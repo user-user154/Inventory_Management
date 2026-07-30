@@ -256,9 +256,24 @@ const formatPosRawToClean = (storeSheets) => {
 };
 
 /**
+ * マスタ未登録でも警告不要と確認済みの商品名（オーダーストップ品・単品トッピング等、
+ * 原価計算の対象外として運用上問題ないと判断したもの）。
+ * ここに追加した名前は「マスタ未登録の商品名」ログ・トーストに出なくなる。
+ */
+const POS_UNMATCHED_IGNORE_LIST_ = [
+  "ネギ塩牛タン",
+  "ホッピーセット",
+  "国産牛 中落ちカルビ",
+  "青唐味噌きゅうり",
+  "炭酸水",
+  "ピリ辛スパイス単品"
+];
+
+/**
  * 整形後POSの統一商品名を レシピ表・中間レシピ表・原材料マスタ の3マスタと突合し、
  * いずれにも存在しない商品名をログに出す（マスタ登録漏れの検知用。値は書き換えない）。
- * @return {string[]} どのマスタにも見つからなかった統一商品名（重複なし）
+ * POS_UNMATCHED_IGNORE_LIST_ に含まれる名前は未登録でも警告対象から除外する。
+ * @return {string[]} どのマスタにも見つからなかった統一商品名（重複なし・無視リスト除く）
  */
 const logUnmatchedPosCleanItems_ = (ss, posMenuNames) => {
   let recipeSheet = ss.getSheetByName(SHEET_NAMES.RECIPE_MASTER);
@@ -270,6 +285,8 @@ const logUnmatchedPosCleanItems_ = (ss, posMenuNames) => {
   let recipeMaster = recipeSheet ? loadRecipeMaster(recipeSheet, unifyMap) : {};
   let preparationRecipes = prepSheet ? loadPreparationRecipes(prepSheet, unifyMap) : {};
   let rawMaster = rawSheet ? loadRawMaterialMaster(rawSheet) : {};
+  let ignoreSet = {};
+  POS_UNMATCHED_IGNORE_LIST_.forEach((n) => { ignoreSet[n] = true; });
 
   let seen = {};
   let uniqueNames = (posMenuNames || [])
@@ -281,6 +298,7 @@ const logUnmatchedPosCleanItems_ = (ss, posMenuNames) => {
     });
 
   let missing = uniqueNames.filter((name) => {
+    if (ignoreSet[name]) return false;
     return !recipeMaster[name] && !preparationRecipes[name] && !rawMaster[name];
   });
 
@@ -322,11 +340,12 @@ const normalizeProductNameChars_ = (s) => {
   return s.replace(/\u3000/g, " ").trim();
 };
 
-/** タグ除去後に ホッピー / ホッピー外 なら除外 */
+/** タグ除去後に ホッピー / ホッピー外 なら除外（"ホッピー(外)" 表記ゆれも同様に除外） */
 const isOriginalHoppeiToDrop_ = (s) => {
   let t = normalizeProductNameBrackets_(normalizeProductNameChars_(String(s)));
   t = t.replace(/^[0-9]+\.\s*/, "").replace(/^[0-9]{3,}\s*/, "");
   t = t.replace(/^\(.*?\)\s*/, "").trim();
+  t = t.replace(/\(外\)$/, "外");
   return t === "ホッピー" || t === "ホッピー外";
 };
 
@@ -410,6 +429,7 @@ const applyProductUnifyRenames_ = (s) => {
   // スパイス系 → カルダモン
   if (s === "スパイス焼酎ハイボール") s = "カルダモンハイボール";
   if (s === "スパイス紅茶ハイ") s = "カルダモン紅茶ハイ";
+  if (s === "スパイス焼酎紅茶ハイ") s = "カルダモン紅茶ハイ";
 
   return s;
 };
