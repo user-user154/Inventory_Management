@@ -891,11 +891,9 @@ const writeBacklogDataRows_ = (sheet, meta, rows) => {
 const writeBacklogMergedOnce = (ctx, backlogRows) => {
   if (!ctx) return;
 
-  let ss = SpreadsheetApp.getActiveSpreadsheet();
-  let sheet = ss.getSheetByName(SHEET_NAMES.BACKLOG);
+  let sheet = ctx.storeSheets && ctx.storeSheets.backlogSheet;
   if (!sheet) {
-    sheet = ss.insertSheet(SHEET_NAMES.BACKLOG);
-    Logger.log(`[バックログ] シート「${SHEET_NAMES.BACKLOG}」を新規作成`);
+    throw new Error(`「${SHEET_NAMES.BACKLOG}」シートが見つかりません。先にメニュー「店舗別シートを作成・整備」を実行してください。`);
   }
 
   let meta = ensureBacklogSheetMeta_(sheet);
@@ -991,11 +989,9 @@ const writeForecastDemandLog_ = (ctx, demandCache) => {
   let rows = buildForecastDemandLogRows_(ctx, demandCache);
   if (rows.length === 0) return;
 
-  let ss = SpreadsheetApp.getActiveSpreadsheet();
-  let sheet = ss.getSheetByName(SHEET_NAMES.FORECAST_DEMAND_LOG);
+  let sheet = ctx.storeSheets && ctx.storeSheets.forecastDemandLogSheet;
   if (!sheet) {
-    sheet = ss.insertSheet(SHEET_NAMES.FORECAST_DEMAND_LOG);
-    Logger.log(`[予測出数] シート「${SHEET_NAMES.FORECAST_DEMAND_LOG}」を新規作成`);
+    throw new Error(`「${SHEET_NAMES.FORECAST_DEMAND_LOG}」シートが見つかりません。先にメニュー「店舗別シートを作成・整備」を実行してください。`);
   }
 
   let meta = ensureForecastDemandSheetMeta_(sheet);
@@ -1009,9 +1005,8 @@ const writeForecastDemandLog_ = (ctx, demandCache) => {
   Logger.log(`[予測出数] 書込 ${rowsWritten} 行（棚卸し=${invDateStr}〜）`);
 };
 
-/** 予測出数ログのデータ行のみ削除 */
-const clearForecastDemandLogData_ = (ss) => {
-  let sheet = ss ? ss.getSheetByName(SHEET_NAMES.FORECAST_DEMAND_LOG) : null;
+/** 予測出数ログのデータ行のみ削除（sheetは店舗別に解決済みのものを渡す） */
+const clearForecastDemandLogData_ = (sheet) => {
   if (!sheet) return 0;
 
   let meta = ensureForecastDemandSheetMeta_(sheet);
@@ -1026,9 +1021,8 @@ const clearForecastDemandLogData_ = (ss) => {
   return numRows;
 };
 
-/** バックログシートのデータ行のみ削除（見出しは残す） */
-const clearBacklogSheetData_ = (ss) => {
-  let sheet = ss ? ss.getSheetByName(SHEET_NAMES.BACKLOG) : null;
+/** バックログシートのデータ行のみ削除（見出しは残す。sheetは店舗別に解決済みのものを渡す） */
+const clearBacklogSheetData_ = (sheet) => {
   if (!sheet) return 0;
 
   let meta = ensureBacklogSheetMeta_(sheet);
@@ -1056,9 +1050,8 @@ const clearAiSnapshotProperties_ = () => {
   return removed;
 };
 
-/** AI予測手動調整ログのデータ行のみ削除（見出しは残す） */
-const clearManualAdjustmentLogData_ = (ss) => {
-  let sheet = ss ? ss.getSheetByName(SHEET_NAMES.MANUAL_ADJUSTMENT_LOG) : null;
+/** AI予測手動調整ログのデータ行のみ削除（見出しは残す。sheetは店舗別に解決済みのものを渡す） */
+const clearManualAdjustmentLogData_ = (sheet) => {
   if (!sheet) return 0;
 
   let meta = findHeaderRowAndIndices(sheet, ["日付", "商材名", "分類"]);
@@ -2953,13 +2946,9 @@ const shouldLogManualAdjustmentEntry_ = (entry) => {
   return Math.abs(entry.qty - entry.aiQty) > 1e-6;
 };
 
-/** 確定コミット時にバックログの指定日付行を差し替え */
-const replaceBacklogRowsForDate_ = (dateStr, newRowsForDate) => {
-  let ss = SpreadsheetApp.getActiveSpreadsheet();
-  let sheet = ss.getSheetByName(SHEET_NAMES.BACKLOG);
-  if (!sheet) {
-    sheet = ss.insertSheet(SHEET_NAMES.BACKLOG);
-  }
+/** 確定コミット時にバックログの指定日付行を差し替え（sheetは店舗別に解決済みのものを渡す） */
+const replaceBacklogRowsForDate_ = (sheet, dateStr, newRowsForDate) => {
+  if (!sheet) return 0;
 
   let meta = ensureBacklogSheetMeta_(sheet);
   if (!meta) return 0;

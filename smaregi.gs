@@ -380,7 +380,7 @@ const runDailyPosImportAndPlanNextDay = () => {
     try {
       if (!storeName) throw new Error(`storeId=${store.storeId} は店舗名が空です`);
       let storeSheets = resolveStoreSheetsByStoreName_(ss, storeName);
-      if (!storeSheets.orderSheet || !storeSheets.budgetSheet) {
+      if (!storeSheets.orderSheet || !storeSheets.budgetSheet || !storeSheets.backlogSheet) {
         throw new Error(`店舗別シート未作成です（「発注管理」→「店舗別シートを作成・整備」を先に実行してください）`);
       }
 
