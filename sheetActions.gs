@@ -261,7 +261,6 @@ const formatPosRawToClean = (storeSheets) => {
  * ここに追加した名前は「マスタ未登録の商品名」ログ・トーストに出なくなる。
  */
 const POS_UNMATCHED_IGNORE_LIST_ = [
-  "ネギ塩牛タン",
   "ホッピーセット",
   "国産牛 中落ちカルビ",
   "青唐味噌きゅうり",
