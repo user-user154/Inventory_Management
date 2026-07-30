@@ -457,3 +457,103 @@ const resetStockSnapshotHistory = () => {
   let result = clearStockSnapshotHistory_(SpreadsheetApp.getActiveSpreadsheet());
   Logger.log(`[棚卸し履歴リセット] 履歴行=${result.clearedRows} / 前回日付=${result.lastDate || "(なし)"} / 前々回日付=${result.prevDate || "(なし)"}`);
 };
+
+/**
+ * 過去日の「日次原価率」だけを再計算する（読み取り専用の需要計算のみ。バックログ・指示書・
+ * 予測出数ログへの書き込みは一切行わない）。
+ *
+ * ①計算実行（runSimulationPipeline）は日次原価率と同時にバックログ（仕込み・発注指示）も
+ * 上書きするため、過去日に向けてまとめて実行すると、その間に確定運用してきたバックログの
+ * 実データを消してしまうリスクがある。日次原価率の算出自体は「その日の実績POS出数から
+ * レシピ展開した理論原価」のみに依存し（coreFunction.gs buildDemandCache_）、バックログを
+ * 生成する在庫・発注シミュレーションのループとは独立しているため、それだけを切り出す。
+ *
+ * 対象日を1日単独のシミュレーション窓（simDays=1）として計算するため、複数日にまたがる
+ * 仕込みロットの廃棄判定は当日分のみでの近似になる（①計算実行を毎日連続運用した場合と
+ * 完全には一致しない場合がある）。
+ */
+const recalculateDailyCostRatioForDate_ = (storeSheets, dateStr, vendorData) => {
+  let orderDate = new Date(`${dateStr}T12:00:00`);
+  let ctx = buildSimulationContext(orderDate, 1, "当日", orderDate, {
+    storeSheets: storeSheets,
+    inventoryDateStr: dateStr,
+    vendorData: vendorData
+  });
+  let demandCache = buildDemandCache_(ctx);
+  let dayDemand = demandCache.days[0];
+  let ratio = dayDemand.foodCostRatio != null
+    ? dayDemand.foodCostRatio
+    : calcFoodCostRatio_(dayDemand.rawOutputDemand, ctx.rawMaster, ctx.budgetActualData[dateStr]);
+  return { date: dateStr, foodCostRatio: ratio };
+};
+
+/**
+ * 開始日〜終了日（未入力なら本日）を1日ずつ日次原価率だけ再計算する
+ * （対象店舗は開いているタブの予算・実績 D1 の選択に従う。バックログ・指示書は変更しない）。
+ * 予算・実績はD2の年月1か月分のみを対象にした月次シートのため、月をまたぐ範囲を指定した場合、
+ * 現在表示中の月に該当する日のみが実際に書き込まれる（他の月の日は計算はされるが書込まれない）。
+ */
+const promptAndRecalculateDailyCostRatioRange = () => {
+  let ss = SpreadsheetApp.getActiveSpreadsheet();
+  let storeSheets = resolveStoreSheetsFromActiveSheet_(ss);
+  if (!storeSheets.budgetSheet) {
+    throw new Error(`「${SHEET_NAMES.BUDGET_ACTUAL}」シートが見つかりません。`);
+  }
+  let store = resolveSelectedSmaregiStore_(storeSheets.budgetSheet);
+
+  let ui = SpreadsheetApp.getUi();
+  let today = formatJstDate_(new Date());
+
+  let startRes = ui.prompt(
+    "日次原価率だけ再計算（バックログ・指示書は変更しません）",
+    `対象店舗: ${store.storeName || store.storeId}\n開始日を yyyy-MM-dd で入力してください`,
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (startRes.getSelectedButton() !== ui.Button.OK) return;
+  let startInput = String(startRes.getResponseText() || "").trim();
+  if (!startInput || isNaN(new Date(`${startInput}T12:00:00`).getTime())) {
+    ui.alert(`開始日の形式が正しくありません: ${startInput}`);
+    return;
+  }
+
+  let endRes = ui.prompt(
+    "日次原価率だけ再計算（バックログ・指示書は変更しません）",
+    `終了日を yyyy-MM-dd で入力してください（空欄なら本日 ${today}）`,
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (endRes.getSelectedButton() !== ui.Button.OK) return;
+  let endInput = String(endRes.getResponseText() || "").trim();
+  let endStr = endInput || today;
+  if (isNaN(new Date(`${endStr}T12:00:00`).getTime())) {
+    ui.alert(`終了日の形式が正しくありません: ${endInput}`);
+    return;
+  }
+  if (startInput > endStr) {
+    ui.alert(`開始日（${startInput}）が終了日（${endStr}）より後になっています。`);
+    return;
+  }
+
+  let vendorSheet = ss.getSheetByName(SHEET_NAMES.VENDOR_MASTER);
+  let vendorData = loadSTVendorCalendar(vendorSheet);
+
+  let results = [];
+  let failed = [];
+  let cursor = startInput;
+  while (cursor <= endStr) {
+    try {
+      results.push(recalculateDailyCostRatioForDate_(storeSheets, cursor, vendorData));
+    } catch (err) {
+      failed.push(`${cursor}: ${err.message}`);
+      Logger.log(`[日次原価率再計算] ${cursor} 失敗: ${err.message}`);
+    }
+    cursor = addDaysToDateStr_(cursor, 1);
+  }
+
+  let written = writeBudgetFoodCostRatios_(storeSheets.budgetSheet, results, { targetDatesStr: [startInput, endStr] });
+
+  notifyUser(
+    `日次原価率の再計算完了: ${startInput}〜${endStr}（計算${results.length}日 / 予算・実績へ書込${written}件）`
+      + (failed.length > 0 ? `\n失敗: ${failed.join(" / ")}` : ""),
+    "日次原価率だけ再計算"
+  );
+};
