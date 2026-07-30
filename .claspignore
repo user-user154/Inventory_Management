@@ -1,0 +1,7 @@
+# clasp push対象を明示的にホワイトリスト化する
+# （.claude/worktrees等、リポジトリ配下に一時的に生成されるディレクトリを
+#  誤って一緒にpushしてファイル名重複エラーになるのを防ぐため）
+**/**
+!appsscript.json
+!*.gs
+!test.js
