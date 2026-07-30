@@ -17,6 +17,7 @@ function onOpen() {
     .addItem("スマレジ実績を取得（当日分・対象店舗のタブを開いてから実行）", "runSmaregiDailyAutoImport")
     .addItem("スマレジ実績を取得（日付指定・対象店舗のタブを開いてから実行）", "promptAndImportSmaregiActuals")
     .addItem("スマレジ実績を再取得（期間を1日ずつ・対象店舗のタブを開いてから実行）", "promptAndBackfillSmaregiActuals")
+    .addItem("日次原価率だけ再計算（期間を1日ずつ・バックログ/指示書は変更しません）", "promptAndRecalculateDailyCostRatioRange")
     .addItem("実績取得→翌日の仕込み・発注計算を今すぐ実行（全店舗）", "runDailyPosImportAndPlanNextDay")
     .addItem("スマレジ日次自動取得トリガーを設定（全店舗を毎晩自動処理）", "setupSmaregiDailyTrigger")
     .addSeparator()
