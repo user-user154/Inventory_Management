@@ -8,7 +8,7 @@ const buildSimulationContext = (simStartDate, simDays, periodMode, orderDate, op
   const storeSheets = options.storeSheets || resolveStoreSheetsFromActiveSheet_(ss);
 
   const nameUnifySheet = ss.getSheetByName(SHEET_NAMES.NAME_UNIFY_MASTER);
-  const stockSheet = ss.getSheetByName(SHEET_NAMES.STOCK_TAKING);
+  const stockSheet = resolveStockTakingSheet_(ss, storeSheets.storeName);
   const rawSheet = ss.getSheetByName(SHEET_NAMES.RAW_MASTER);
   const prepSheet = ss.getSheetByName(SHEET_NAMES.PREPARATION_RECIPE);
   const recipeSheet = ss.getSheetByName(SHEET_NAMES.RECIPE_MASTER);

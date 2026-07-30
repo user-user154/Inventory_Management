@@ -94,7 +94,7 @@ const runSimulationPipeline = (storeSheets) => {
   let orderDate = new Date(rawDate); // 指示書 B2（計算したい基準日）
   let budgetSheet = storeSheets.budgetSheet;
   let period = "当日"; // 予算・実績 D1 は店舗選択に転用したため、期間は常に当日固定
-  let stockSheet = ss.getSheetByName(SHEET_NAMES.STOCK_TAKING);
+  let stockSheet = resolveStockTakingSheet_(ss, storeSheets.storeName);
   let inventoryVal = stockSheet ? stockSheet.getRange("B1").getValue() : null;
   let inventoryDate = (inventoryVal && !isNaN(new Date(inventoryVal).getTime())) ? new Date(inventoryVal) : null;
 
