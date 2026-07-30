@@ -163,7 +163,7 @@ const buildInfomartAuthorizationUrl_ = (storeName) => {
  * doGet() が認可コードを受け取ってリフレッシュトークンを保存する。
  */
 const promptInfomartAuthorizationUrl = () => {
-  let budgetSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  let budgetSheet = resolveStoreSheetsFromActiveSheet_().budgetSheet;
   let store = resolveSelectedSmaregiStore_(budgetSheet);
   let url = buildInfomartAuthorizationUrl_(store.storeName);
 
@@ -409,7 +409,7 @@ const importInfomartInvoicesForDate_ = (dateStr, storeName) => {
 
 /** 当日分を取得（メニューからの手動実行用。対象店舗は予算・実績 D1 の選択に従う） */
 const runInfomartInvoiceImportToday = () => {
-  let budgetSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  let budgetSheet = resolveStoreSheetsFromActiveSheet_().budgetSheet;
   let storeName = resolveSelectedInfomartStoreName_(budgetSheet);
   importInfomartInvoicesForDate_(formatJstDate_(new Date()), storeName);
 };
@@ -417,7 +417,7 @@ const runInfomartInvoiceImportToday = () => {
 /** 日付を指定して手動取得（空欄なら本日、対象店舗は予算・実績 D1 の選択に従う） */
 const promptAndImportInfomartInvoices = () => {
   let ss = SpreadsheetApp.getActiveSpreadsheet();
-  let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  let budgetSheet = resolveStoreSheetsFromActiveSheet_(ss).budgetSheet;
   let storeName = resolveSelectedInfomartStoreName_(budgetSheet);
 
   let ui = SpreadsheetApp.getUi();
@@ -566,7 +566,7 @@ const importInfomartOrderDeliveryForDateRange_ = (dateFrom, dateTo, storeName) =
 /** 日付範囲を指定して手動取得（対象店舗は予算・実績 D1 の選択に従う） */
 const promptAndImportInfomartOrderDelivery = () => {
   let ss = SpreadsheetApp.getActiveSpreadsheet();
-  let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  let budgetSheet = resolveStoreSheetsFromActiveSheet_(ss).budgetSheet;
   let storeName = resolveSelectedInfomartStoreName_(budgetSheet);
 
   let ui = SpreadsheetApp.getUi();

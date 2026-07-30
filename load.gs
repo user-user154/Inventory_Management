@@ -5,13 +5,14 @@
 const buildSimulationContext = (simStartDate, simDays, periodMode, orderDate, options) => {
   options = options || {};
   const ss = SpreadsheetApp.getActiveSpreadsheet();
-  
+  const storeSheets = options.storeSheets || resolveStoreSheetsFromActiveSheet_(ss);
+
   const nameUnifySheet = ss.getSheetByName(SHEET_NAMES.NAME_UNIFY_MASTER);
   const stockSheet = ss.getSheetByName(SHEET_NAMES.STOCK_TAKING);
   const rawSheet = ss.getSheetByName(SHEET_NAMES.RAW_MASTER);
   const prepSheet = ss.getSheetByName(SHEET_NAMES.PREPARATION_RECIPE);
   const recipeSheet = ss.getSheetByName(SHEET_NAMES.RECIPE_MASTER);
-  const budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  const budgetSheet = storeSheets.budgetSheet;
   const vendorSheet = ss.getSheetByName(SHEET_NAMES.VENDOR_MASTER);
   const yieldSheet = ss.getSheetByName(SHEET_NAMES.YIELD_MASTER);
   let period = periodMode || "当日";
@@ -53,7 +54,7 @@ const buildSimulationContext = (simStartDate, simDays, periodMode, orderDate, op
 
   logMissingBudgetDates(targetDatesStr, budgetActualData);
 
-  let posCleanData = loadPosCleanData(ss.getSheetByName(SHEET_NAMES.POS_CLEAN));
+  let posCleanData = loadPosCleanData(storeSheets.posCleanSheet);
   let posTotalRevenue = 0;
   let posTotalSalesQty = 0;
   posCleanData.forEach((r) => {
@@ -72,7 +73,7 @@ const buildSimulationContext = (simStartDate, simDays, periodMode, orderDate, op
   let backlogSheet = ss.getSheetByName(SHEET_NAMES.BACKLOG);
   let backlogMeta = backlogSheet ? findSheetHeaderMeta(backlogSheet, ["日付", "商材名", "分類"]) : null;
 
-  let orderSheet = ss.getSheetByName(SHEET_NAMES.ORDER_FORM);
+  let orderSheet = storeSheets.orderSheet;
   let averageSpend = 4000;
   if (options.averageSpend != null && !isNaN(options.averageSpend)) {
     averageSpend = Number(options.averageSpend);
