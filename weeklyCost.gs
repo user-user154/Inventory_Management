@@ -61,7 +61,7 @@ const runWeeklyFoodCostRatioPipeline = (storeSheets) => {
   }
 
   let breakdown = computeWeeklyFoodCostBreakdown_(
-    budgetSheet, period.prevDateStr, period.prevSnapshot, currentDateStr, currentSnapshot, ctx
+    budgetSheet, period.prevDateStr, period.prevSnapshot, currentDateStr, currentSnapshot, ctx, storeSheets.backlogSheet
   );
   if (!breakdown.ok) {
     return { updated: false, weeklyRatio: null, message: breakdown.message };
@@ -95,7 +95,7 @@ const runWeeklyFoodCostRatioPipeline = (storeSheets) => {
  * 週次原価率の内訳を算出（診断・本番共通）
  * 仕入れはバックログ発注を納品日で期間判定する
  */
-const computeWeeklyFoodCostBreakdown_ = (budgetSheet, prevDateStr, prevSnapshot, currentDateStr, currentSnapshot, ctx) => {
+const computeWeeklyFoodCostBreakdown_ = (budgetSheet, prevDateStr, prevSnapshot, currentDateStr, currentSnapshot, ctx, backlogSheet) => {
   let salesFromStr = addDaysToDateStr_(prevDateStr, 1);
   let salesToStr = currentDateStr;
   if (salesFromStr > salesToStr) {
@@ -104,7 +104,7 @@ const computeWeeklyFoodCostBreakdown_ = (budgetSheet, prevDateStr, prevSnapshot,
 
   let prevAmount = calcStockSnapshotValue_(prevSnapshot, ctx);
   let currentAmount = calcStockSnapshotValue_(currentSnapshot, ctx);
-  let purchaseDetail = calcPeriodPurchaseAmount_(salesFromStr, salesToStr, ctx);
+  let purchaseDetail = calcPeriodPurchaseAmount_(salesFromStr, salesToStr, ctx, backlogSheet);
   let purchaseAmount = purchaseDetail.total;
   let periodSales = sumBudgetActualSalesForPeriod_(budgetSheet, salesFromStr, salesToStr);
 
@@ -150,7 +150,8 @@ const logWeeklyFoodCostBreakdown_ = (breakdown, variance) => {
 const debugWeeklyFoodCostRatio = () => {
   let ss = SpreadsheetApp.getActiveSpreadsheet();
   let stockSheet = ss.getSheetByName(SHEET_NAMES.STOCK_TAKING);
-  let budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET_ACTUAL);
+  let storeSheets = resolveStoreSheetsFromActiveSheet_(ss);
+  let budgetSheet = storeSheets.budgetSheet;
   if (!stockSheet || !budgetSheet) {
     Logger.log("[診断] 棚卸し表または予算・実績がありません");
     return;
@@ -180,7 +181,7 @@ const debugWeeklyFoodCostRatio = () => {
   }
 
   let breakdown = computeWeeklyFoodCostBreakdown_(
-    budgetSheet, period.prevDateStr, period.prevSnapshot, currentDateStr, currentSnapshot, ctx
+    budgetSheet, period.prevDateStr, period.prevSnapshot, currentDateStr, currentSnapshot, ctx, storeSheets.backlogSheet
   );
   if (!breakdown.ok) {
     Logger.log(`[診断] ${breakdown.message}`);
@@ -242,9 +243,7 @@ const calcStockSnapshotValue_ = (stockData, ctx) => {
  * 前回棚卸し翌日〜今回棚卸し日に納品されたバックログ発注を金額化
  * バックログの日付は発注日のため、業者LTで納品日へ換算して期間判定する
  */
-const calcPeriodPurchaseAmount_ = (fromDateStr, toDateStr, ctx) => {
-  let ss = SpreadsheetApp.getActiveSpreadsheet();
-  let sheet = ss.getSheetByName(SHEET_NAMES.BACKLOG);
+const calcPeriodPurchaseAmount_ = (fromDateStr, toDateStr, ctx, sheet) => {
   let empty = {
     total: 0,
     matchedRows: 0,

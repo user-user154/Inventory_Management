@@ -1,30 +1,35 @@
 /**
- * 8. storeSheets.gs: 店舗別シート（予算・実績 / 指示書 / POSデータ_生 / POSデータ_整形後）の
- * 命名規則・解決・作成
+ * 8. storeSheets.gs: 店舗別シート（予算・実績 / 指示書 / POSデータ_生 / POSデータ_整形後 /
+ * バックログ / AI予測手動調整ログ / 予測出数ログ）の命名規則・解決・作成
  *
  * 背景: 複数店舗を1つのスプレッドシート＋1つのスクリプトプロジェクトで運用するため
  * （スクリプトプロパティ POS_CLIENT_ID 等はファイルコピーでは引き継がれないため、
- * ファイル分割ではなくシート分割を採用）、店舗ごとの運用4シートを
+ * ファイル分割ではなくシート分割を採用）、店舗ごとの運用シートを
  * 「元の名前_店舗名」（例: 予算・実績_渋谷店）という命名規則で複製する。
  *
  * 元の固定名シート（例: 予算・実績）はテンプレート/ひな形として残し、削除・改名はしない
  * （既存データを壊さないため）。店舗別シート未作成の状態でも、元の固定名シートで
  * 従来どおり動作する（storeName が null のときは元の名前をそのまま使う後方互換）。
  *
+ * バックログ・AI予測手動調整ログ・予測出数ログは、日付のみで行を置換するロジックのため
+ * 元々は店舗共有シートのままにしていたが、複数店舗が同日に運用すると互いの行を上書きする
+ * リスクがあったため、他の運用シートと同じ店舗別タブ方式に統一した。
+ *
  * 対象外（分割しない・共有のまま）: レシピ表・中間レシピ表・原材料マスタ・歩留まりマスタ・
  * 名寄せマスタ・発注業者マスタ・棚卸し表（マスタ系）、実績出数ログ（既にstoreId列で対応済み）、
- * 確定指示ログ・AI予測手動調整ログ・バックログ・予測出数ログ・Infomart請求書ログ・
- * Infomart受発注ログ（ログ系。店舗単位で分けるべきという意見もあるが、今回のスコープでは
- * 変更しない。日付のみで行を置換するロジックのため、複数店舗が同日に運用すると
- * 互いの行を上書きする可能性がある点は要注意 — 詳細はコミットメッセージ・引継ぎ資料参照）。
+ * 確定指示ログ（コード上どこからも参照されない未使用シート）、Infomart請求書ログ・
+ * Infomart受発注ログ（店舗ごとの資格情報でAPIを取得し追記するだけのログのため共有のままで十分）。
  */
 
-/** 店舗別に分割する4シートのベース名（constants.gs の SHEET_NAMES を参照） */
+/** 店舗別に分割するシートのベース名（constants.gs の SHEET_NAMES を参照） */
 const STORE_SPLIT_SHEET_BASES_ = [
   SHEET_NAMES.BUDGET_ACTUAL,
   SHEET_NAMES.ORDER_FORM,
   SHEET_NAMES.POS_RAW,
-  SHEET_NAMES.POS_CLEAN
+  SHEET_NAMES.POS_CLEAN,
+  SHEET_NAMES.BACKLOG,
+  SHEET_NAMES.MANUAL_ADJUSTMENT_LOG,
+  SHEET_NAMES.FORECAST_DEMAND_LOG
 ];
 
 /** 店舗別シート名を組み立てる（例: "予算・実績" + "渋谷店" → "予算・実績_渋谷店"） */
@@ -67,7 +72,7 @@ const isBudgetActualSheetName_ = (sheetName) => {
 
 /**
  * 指定店舗名（null可＝元の固定名シートを使う後方互換モード）で
- * 4シートを解決する。未作成のシートは null になる（呼び出し側で存在チェックすること）。
+ * 店舗別運用シート一式を解決する。未作成のシートは null になる（呼び出し側で存在チェックすること）。
  */
 const resolveStoreSheetsByStoreName_ = (ss, storeName) => {
   let name = storeName ? String(storeName).trim() : "";
@@ -81,7 +86,10 @@ const resolveStoreSheetsByStoreName_ = (ss, storeName) => {
     budgetSheet: sheetFor(SHEET_NAMES.BUDGET_ACTUAL),
     orderSheet: sheetFor(SHEET_NAMES.ORDER_FORM),
     posRawSheet: sheetFor(SHEET_NAMES.POS_RAW),
-    posCleanSheet: sheetFor(SHEET_NAMES.POS_CLEAN)
+    posCleanSheet: sheetFor(SHEET_NAMES.POS_CLEAN),
+    backlogSheet: sheetFor(SHEET_NAMES.BACKLOG),
+    manualAdjustmentLogSheet: sheetFor(SHEET_NAMES.MANUAL_ADJUSTMENT_LOG),
+    forecastDemandLogSheet: sheetFor(SHEET_NAMES.FORECAST_DEMAND_LOG)
   };
 };
 
@@ -108,9 +116,10 @@ const resolveStoreSheetsFromActiveSheet_ = (ss) => {
   let result = resolveStoreSheetsForSheet_(active);
   if (!result) {
     throw new Error(
-      `対象店舗を判定できません。対象店舗の「${SHEET_NAMES.BUDGET_ACTUAL}」「${SHEET_NAMES.ORDER_FORM}」`
-      + `「${SHEET_NAMES.POS_RAW}」「${SHEET_NAMES.POS_CLEAN}」いずれかのタブを開いてから実行してください`
-      + `（現在アクティブなシート: 「${active ? active.getName() : "(不明)"}」）。`
+      `対象店舗を判定できません。対象店舗の運用タブ（「${SHEET_NAMES.BUDGET_ACTUAL}」「${SHEET_NAMES.ORDER_FORM}」`
+      + `「${SHEET_NAMES.POS_RAW}」「${SHEET_NAMES.POS_CLEAN}」「${SHEET_NAMES.BACKLOG}」`
+      + `「${SHEET_NAMES.MANUAL_ADJUSTMENT_LOG}」「${SHEET_NAMES.FORECAST_DEMAND_LOG}」のいずれか）`
+      + `を開いてから実行してください（現在アクティブなシート: 「${active ? active.getName() : "(不明)"}」）。`
     );
   }
   return result;
@@ -143,14 +152,62 @@ const applySmaregiStoreSelectionToSheet_ = (budgetSheet, store, allStores) => {
 };
 
 /**
- * 店舗別運用シート（予算・実績 / 指示書 / POSデータ_生 / POSデータ_整形後）を
- * スマレジの店舗一覧に合わせて作成・整備する（メニューから手動実行）。
- *
- * 既存の店舗別シートがあれば作り直さない（データを消さない）。
+ * 1店舗分の店舗別運用シート一式を作成・整備する（既存の店舗別シートがあれば作り直さない）。
  * 新規シートは元の固定名シート（テンプレート）を複製して作る（書式・見出し・入力規則を引き継ぐ）。
  * 注意: 複製時は元シートの「中身（値）」もそのままコピーされる。元シートに入力中の実データが
  * あった場合、複数店舗すべてに同じ値がコピーされるため、各店舗タブの内容は運用開始前に
  * 必ず確認・修正すること（本関数はテンプレートの値を自動では消さない＝安全側に倒した設計）。
+ *
+ * @param {Spreadsheet} ss
+ * @param {{storeId: string, storeName: string}} store 対象店舗
+ * @param {Array} allStores D1プルダウンの選択肢に使う全店舗一覧（省略時は store 単独）
+ * @return {{storeName: string, createdBases: string[], missingTemplates: string[]}}
+ */
+const provisionStoreOperationSheets_ = (ss, store, allStores) => {
+  let storeName = String((store && store.storeName) || "").trim();
+  if (!storeName) {
+    return { storeName: "", createdBases: [], missingTemplates: [], skippedNoName: true };
+  }
+
+  let createdBases = [];
+  let missingTemplates = [];
+
+  STORE_SPLIT_SHEET_BASES_.forEach((base) => {
+    let targetName = buildStoreSheetName_(base, storeName);
+    let existing = ss.getSheetByName(targetName);
+    if (existing) return;
+
+    let template = ss.getSheetByName(base);
+    if (!template) {
+      missingTemplates.push(base);
+      return;
+    }
+
+    let newSheet = template.copyTo(ss);
+    newSheet.setName(targetName);
+    createdBases.push(base);
+  });
+
+  let storeSheets = resolveStoreSheetsByStoreName_(ss, storeName);
+
+  if (storeSheets.orderSheet) {
+    setupOrderSheetActionControls_(storeSheets.orderSheet);
+    setupOrderSheetManualInputArea(storeSheets.orderSheet);
+    resetStuckOrderSheetCheckboxIfNeeded_(storeSheets.orderSheet);
+    clearLegacySheetTriggerCheckboxes_(storeSheets.orderSheet);
+  }
+  if (storeSheets.budgetSheet) {
+    clearLegacySheetTriggerCheckboxes_(storeSheets.budgetSheet);
+    setupBudgetStartDateDropdown_(storeSheets.budgetSheet);
+    applySmaregiStoreSelectionToSheet_(storeSheets.budgetSheet, store, allStores || [store]);
+  }
+
+  return { storeName: storeName, createdBases: createdBases, missingTemplates: missingTemplates };
+};
+
+/**
+ * 店舗別運用シート一式を、スマレジの店舗一覧に合わせて全店舗分作成・整備する（メニューから手動実行）。
+ * 実体は店舗ごとに `provisionStoreOperationSheets_` を呼ぶだけ。
  */
 const setupPerStoreOperationSheets = () => {
   let ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -164,49 +221,18 @@ const setupPerStoreOperationSheets = () => {
   let warnings = [];
 
   stores.forEach((store) => {
-    let storeName = String(store.storeName || "").trim();
-    if (!storeName) {
+    let result = provisionStoreOperationSheets_(ss, store, stores);
+    if (result.skippedNoName) {
       warnings.push(`storeId=${store.storeId} は店舗名が空のためスキップ`);
       return;
     }
 
-    let createdBases = [];
-    let missingTemplates = [];
-
-    STORE_SPLIT_SHEET_BASES_.forEach((base) => {
-      let targetName = buildStoreSheetName_(base, storeName);
-      let existing = ss.getSheetByName(targetName);
-      if (existing) return;
-
-      let template = ss.getSheetByName(base);
-      if (!template) {
-        missingTemplates.push(base);
-        return;
-      }
-
-      let newSheet = template.copyTo(ss);
-      newSheet.setName(targetName);
-      createdBases.push(base);
-    });
-
-    let storeSheets = resolveStoreSheetsByStoreName_(ss, storeName);
-
-    if (storeSheets.orderSheet) {
-      setupOrderSheetActionControls_(storeSheets.orderSheet);
-      setupOrderSheetManualInputArea(storeSheets.orderSheet);
-      resetStuckOrderSheetCheckboxIfNeeded_(storeSheets.orderSheet);
-      clearLegacySheetTriggerCheckboxes_(storeSheets.orderSheet);
-    }
-    if (storeSheets.budgetSheet) {
-      clearLegacySheetTriggerCheckboxes_(storeSheets.budgetSheet);
-      setupBudgetStartDateDropdown_(storeSheets.budgetSheet);
-      applySmaregiStoreSelectionToSheet_(storeSheets.budgetSheet, store, stores);
-    }
-
-    let detail = createdBases.length > 0 ? `新規作成${createdBases.length}件(${createdBases.join("/")})` : "既存シートを整備";
-    summaries.push(`${storeName}: ${detail}`);
-    if (missingTemplates.length > 0) {
-      warnings.push(`${storeName}: テンプレート「${missingTemplates.join("/")}」が見つからず未作成`);
+    let detail = result.createdBases.length > 0
+      ? `新規作成${result.createdBases.length}件(${result.createdBases.join("/")})`
+      : "既存シートを整備";
+    summaries.push(`${result.storeName}: ${detail}`);
+    if (result.missingTemplates.length > 0) {
+      warnings.push(`${result.storeName}: テンプレート「${result.missingTemplates.join("/")}」が見つからず未作成`);
     }
   });
 
@@ -216,4 +242,16 @@ const setupPerStoreOperationSheets = () => {
   }
   message += `\n\n※新規作成タブには元シートの内容（値）がそのままコピーされています。運用前に各店舗タブの中身を確認してください。`;
   notifyUser(message, "店舗別シート整備");
+};
+
+/**
+ * シート名が「予算・実績」で始まるが、正式な店舗別命名（元の固定名 or "予算・実績_店舗名"）に
+ * 一致しない場合、trueを返す。Googleスプレッドシートの「シートを複製」操作で生成される既定の
+ * シート名（例:「予算・実績のコピー」）を検出し、D1で店舗を選んだ際に自動整備する対象を判定するため。
+ */
+const looksLikeUnassignedBudgetActualCopy_ = (sheetName) => {
+  let name = String(sheetName || "");
+  let base = SHEET_NAMES.BUDGET_ACTUAL;
+  if (name.indexOf(base) !== 0) return false;
+  return parseStoreSheetName_(name) === null;
 };

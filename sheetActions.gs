@@ -56,9 +56,63 @@ const handleSpreadsheetEdit_ = (e) => {
       dispatchOrderSheetAction_(e, sheet);
       return;
     }
+
+    if (looksLikeUnassignedBudgetActualCopy_(sheetName)) {
+      handleUnassignedBudgetActualCopyD1Edit_(e, sheet);
+      return;
+    }
   } finally {
     lock.releaseLock();
   }
+};
+
+/** D1（スマレジ店舗プルダウン、SMAREGI_STORE_DROPDOWN_CELL_="D1"）の単一セル編集か判定 */
+const isSmaregiStoreDropdownCellEdit_ = (e) => {
+  if (!e || !e.range) return false;
+  return e.range.getRow() === 1 && e.range.getColumn() === 4
+    && e.range.getNumRows() === 1 && e.range.getNumColumns() === 1;
+};
+
+/**
+ * 「予算・実績」を手動複製したが店舗未割り当てのシート（例:「予算・実績のコピー」）で
+ * D1に店舗を選択した際、自動でシート名・関連シート一式（指示書/POS生/POS整形後/バックログ/
+ * AI予測手動調整ログ/予測出数ログ）を整備する。
+ * - 対象店舗のシートがまだ存在しなければ、このシートをリネーム＋残りをテンプレートから複製・整備。
+ * - 既に存在する場合はリネームすると名前が衝突するため、アラートのみでデータは変更しない。
+ * - D1の値が店舗一覧に一致しない（選択途中・無効値）場合は何もしない。
+ */
+const handleUnassignedBudgetActualCopyD1Edit_ = (e, sheet) => {
+  if (!isSmaregiStoreDropdownCellEdit_(e)) return;
+
+  let raw = sheet.getRange(SMAREGI_STORE_DROPDOWN_CELL_).getValue();
+  let parsed = parseSmaregiStoreCellValue_(raw);
+  if (!parsed) return;
+
+  let stores = getSmaregiStores_();
+  let store = stores.filter((s) => { return String(s.storeId) === String(parsed.storeId); })[0];
+  if (!store) return;
+
+  let storeName = String(store.storeName || "").trim();
+  if (!storeName) return;
+
+  let ss = sheet.getParent();
+  let targetName = buildStoreSheetName_(SHEET_NAMES.BUDGET_ACTUAL, storeName);
+  if (ss.getSheetByName(targetName)) {
+    SpreadsheetApp.getUi().alert(
+      `「${targetName}」は既に存在するため、このコピー（「${sheet.getName()}」）は自動整備できません。`
+      + "重複コピーの可能性があります。内容を確認して手動で削除・統合してください。"
+    );
+    return;
+  }
+
+  sheet.setName(targetName);
+  let result = provisionStoreOperationSheets_(ss, store, stores);
+  notifyUser(
+    `「${storeName}」用の店舗別シートを自動整備しました`
+      + (result.createdBases.length > 0 ? `（新規作成: ${result.createdBases.join("/")}）` : "")
+      + "。運用前に各タブの内容を確認してください。",
+    "店舗別シート自動整備"
+  );
 };
 
 /** 指示書 B1: A1 で選んだ操作を実行 */
@@ -582,8 +636,7 @@ const writePosCleanSheet = (cleanSheet, rows) => {
 /**
  * 確定コミット: バックログへ最終反映 + 手動調整を AI予測手動調整ログ へ出力
  * （対象店舗のタブを開いてから実行。チェックボックス経由なら自動解決）
- * バックログ・AI予測手動調整ログは店舗共有シートのまま（日付のみで行を置換するため、
- * 複数店舗が同日に確定コミットすると互いの行を上書きする可能性がある点に注意）
+ * バックログ・AI予測手動調整ログも店舗別タブ（storeSheets）から解決する。
  * @param {object} [storeSheets] resolveStoreSheetsFromActiveSheet_ 等で解決済みの店舗別シート一式
  */
 const commitOrderSheetToBacklogAndLog = (storeSheets) => {
@@ -594,9 +647,13 @@ const commitOrderSheetToBacklogAndLog = (storeSheets) => {
     throw new Error(`「${SHEET_NAMES.ORDER_FORM}」シートが見つかりません。`);
   }
 
-  let logSheet = ss.getSheetByName(SHEET_NAMES.MANUAL_ADJUSTMENT_LOG);
+  let backlogSheet = storeSheets.backlogSheet;
+  if (!backlogSheet) {
+    throw new Error(`「${SHEET_NAMES.BACKLOG}」シートが見つかりません。先にメニュー「店舗別シートを作成・整備」を実行してください。`);
+  }
+  let logSheet = storeSheets.manualAdjustmentLogSheet;
   if (!logSheet) {
-    throw new Error(`「${SHEET_NAMES.MANUAL_ADJUSTMENT_LOG}」シートが見つかりません。`);
+    throw new Error(`「${SHEET_NAMES.MANUAL_ADJUSTMENT_LOG}」シートが見つかりません。先にメニュー「店舗別シートを作成・整備」を実行してください。`);
   }
 
   let rawDate = orderSheet.getRange("B2").getValue();
@@ -608,7 +665,7 @@ const commitOrderSheetToBacklogAndLog = (storeSheets) => {
   let rawMaster = loadRawMaterialMasterCached_(ss);
 
   let backlogRows = buildCommittedBacklogRows_(dateStr, orderSheet, aiSnapshot, rawMaster);
-  let backlogCount = replaceBacklogRowsForDate_(dateStr, backlogRows);
+  let backlogCount = replaceBacklogRowsForDate_(backlogSheet, dateStr, backlogRows);
 
   let entries = collectManualAdjustmentEntries(orderSheet, aiSnapshot, rawMaster);
   writeManualAdjustmentLogForDate(logSheet, dateStr, entries);
@@ -617,14 +674,33 @@ const commitOrderSheetToBacklogAndLog = (storeSheets) => {
 };
 
 /**
- * デバッグ用: バックログ系の履歴を一括削除
+ * 指定ベース名（例: SHEET_NAMES.BACKLOG）について、テンプレート＋全店舗分の
+ * 実在するシートを重複なく集める（バックログ系リセットで全店舗分を確実にクリアするため）。
+ */
+const collectAllStoreSplitSheetsForBase_ = (ss, base, stores) => {
+  let names = [base].concat((stores || []).map((s) => {
+    return buildStoreSheetName_(base, String(s.storeName || "").trim());
+  }));
+  let seen = {};
+  let sheets = [];
+  names.forEach((name) => {
+    if (!name || seen[name]) return;
+    seen[name] = true;
+    let sheet = ss.getSheetByName(name);
+    if (sheet) sheets.push(sheet);
+  });
+  return sheets;
+};
+
+/**
+ * デバッグ用: バックログ系の履歴を一括削除（テンプレート＋全店舗分のシートが対象）
  * メニュー「発注管理」または Apps Script から resetBacklogRelatedHistory() を実行
  */
 function resetBacklogRelatedHistory() {
   let ui = SpreadsheetApp.getUi();
   let answer = ui.alert(
-    "バックログ系データの一括削除",
-    "次をすべて削除します（元に戻せません）。\n"
+    "バックログ系データの一括削除（全店舗分）",
+    "次を全店舗分すべて削除します（元に戻せません）。\n"
       + "・バックログ\n"
       + "・予測出数ログ\n"
       + "・棚卸し履歴（週次原価率の前回日付もリセット）\n"
@@ -636,16 +712,27 @@ function resetBacklogRelatedHistory() {
   if (answer !== ui.Button.YES) return;
 
   let ss = SpreadsheetApp.getActiveSpreadsheet();
-  let backlogRows = clearBacklogSheetData_(ss);
-  let forecastRows = clearForecastDemandLogData_(ss);
+  let stores = getSmaregiStores_();
+
+  let backlogRows = 0;
+  collectAllStoreSplitSheetsForBase_(ss, SHEET_NAMES.BACKLOG, stores).forEach((sheet) => {
+    backlogRows += clearBacklogSheetData_(sheet);
+  });
+  let forecastRows = 0;
+  collectAllStoreSplitSheetsForBase_(ss, SHEET_NAMES.FORECAST_DEMAND_LOG, stores).forEach((sheet) => {
+    forecastRows += clearForecastDemandLogData_(sheet);
+  });
+  let manualLogRows = 0;
+  collectAllStoreSplitSheetsForBase_(ss, SHEET_NAMES.MANUAL_ADJUSTMENT_LOG, stores).forEach((sheet) => {
+    manualLogRows += clearManualAdjustmentLogData_(sheet);
+  });
   let stockResult = clearStockSnapshotHistory_(ss);
   let aiSnapshots = clearAiSnapshotProperties_();
-  let manualLogRows = clearManualAdjustmentLogData_(ss);
 
   Logger.log(`[バックログ系リセット] バックログ=${backlogRows} 予測出数ログ=${forecastRows} 棚卸し履歴=${stockResult.clearedRows} AIスナップショット=${aiSnapshots} 手動調整ログ=${manualLogRows}`);
 
   notifyUser(
-    `削除完了\nバックログ ${backlogRows} 行\n予測出数ログ ${forecastRows} 行\n棚卸し履歴 ${stockResult.clearedRows} 行\nAIスナップショット ${aiSnapshots} 件\n手動調整ログ ${manualLogRows} 行`,
+    `削除完了（全店舗分）\nバックログ ${backlogRows} 行\n予測出数ログ ${forecastRows} 行\n棚卸し履歴 ${stockResult.clearedRows} 行\nAIスナップショット ${aiSnapshots} 件\n手動調整ログ ${manualLogRows} 行`,
     "バックログ系リセット"
   );
 }

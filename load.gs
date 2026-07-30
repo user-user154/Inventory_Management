@@ -70,7 +70,7 @@ const buildSimulationContext = (simStartDate, simDays, periodMode, orderDate, op
     Logger.log(`[実績出数] 対象店舗が未選択のため実績データはスキップ: ${err.message}`);
   }
 
-  let backlogSheet = ss.getSheetByName(SHEET_NAMES.BACKLOG);
+  let backlogSheet = storeSheets.backlogSheet;
   let backlogMeta = backlogSheet ? findSheetHeaderMeta(backlogSheet, ["日付", "商材名", "分類"]) : null;
 
   let orderSheet = storeSheets.orderSheet;
@@ -90,6 +90,7 @@ const buildSimulationContext = (simStartDate, simDays, periodMode, orderDate, op
     periodMode: period,
     targetDatesStr: targetDatesStr,
     inventoryDateStr: inventoryDateStr,
+    storeSheets: storeSheets,
     rawMaster: rawMaster,
     preparationRecipes: prepRecipes,
     recipeMaster: recipeMaster,
