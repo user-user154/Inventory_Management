@@ -392,8 +392,8 @@ const promptAndImportSmaregiActuals = () => {
 };
 
 /**
- * 開始日〜本日を1日ずつ importSmaregiDailyActuals_ で取り直す（取得漏れの手当て用）。
- * 例: 取得トリガーの時刻変更前に取りきれていなかった日を、開始日を指定してまとめて再取得する。
+ * 開始日〜指定期日（未入力なら本日）を1日ずつ importSmaregiDailyActuals_ で取り直す（取得漏れの手当て用）。
+ * 例: 取得トリガーの時刻変更前に取りきれていなかった期間を、開始日・終了日を指定してまとめて再取得する。
  * 対象店舗は promptAndImportSmaregiActuals と同じく予算・実績 D1 の選択に従う。
  * 1日ごとにAPIを叩き直すため、対象日数が多いと実行時間がかかる（GASの実行時間上限に注意）。
  */
@@ -404,24 +404,38 @@ const promptAndBackfillSmaregiActuals = () => {
 
   let ui = SpreadsheetApp.getUi();
   let today = formatJstDate_(new Date());
-  let res = ui.prompt(
-    "スマレジ実績 再取得（開始日〜本日を1日ずつ）",
-    `対象店舗: ${store.storeName || store.storeId}\n開始日を yyyy-MM-dd で入力してください（終了日は本日 ${today} 固定）`,
+
+  let startRes = ui.prompt(
+    "スマレジ実績 再取得（期間を1日ずつ）",
+    `対象店舗: ${store.storeName || store.storeId}\n開始日を yyyy-MM-dd で入力してください`,
     ui.ButtonSet.OK_CANCEL
   );
-  if (res.getSelectedButton() !== ui.Button.OK) return;
-
-  let input = String(res.getResponseText() || "").trim();
-  if (!input || isNaN(new Date(`${input}T12:00:00`).getTime())) {
-    ui.alert(`日付の形式が正しくありません: ${input}`);
-    return;
-  }
-  if (input > today) {
-    ui.alert(`開始日は本日（${today}）以前にしてください。`);
+  if (startRes.getSelectedButton() !== ui.Button.OK) return;
+  let startInput = String(startRes.getResponseText() || "").trim();
+  if (!startInput || isNaN(new Date(`${startInput}T12:00:00`).getTime())) {
+    ui.alert(`開始日の形式が正しくありません: ${startInput}`);
     return;
   }
 
-  runSmaregiBackfillActuals_(input, today, store);
+  let endRes = ui.prompt(
+    "スマレジ実績 再取得（期間を1日ずつ）",
+    `終了日（指定期日）を yyyy-MM-dd で入力してください（空欄なら本日 ${today}）`,
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (endRes.getSelectedButton() !== ui.Button.OK) return;
+  let endInput = String(endRes.getResponseText() || "").trim();
+  let endStr = endInput || today;
+  if (isNaN(new Date(`${endStr}T12:00:00`).getTime())) {
+    ui.alert(`終了日の形式が正しくありません: ${endInput}`);
+    return;
+  }
+
+  if (startInput > endStr) {
+    ui.alert(`開始日（${startInput}）が終了日（${endStr}）より後になっています。`);
+    return;
+  }
+
+  runSmaregiBackfillActuals_(startInput, endStr, store);
 };
 
 /** startStr〜endStr（両端含む・yyyy-MM-dd）を1日ずつ再取得。1日分の失敗は握りつぶさず記録し、次の日へ続行する */
