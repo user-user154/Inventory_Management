@@ -188,7 +188,49 @@ const formatPosRawToClean = () => {
   let hoppeiCount = aggregated.filter((r) => {
     return r.menuName === "ホッピー白" || r.menuName === "ホッピー黒";
   }).length;
-  notifyUser(`POS整形完了: ${aggregated.length} 商品（ホッピー白/黒: ${hoppeiCount}件）を「${SHEET_NAMES.POS_CLEAN}」に出力。オプション系の変換はログを確認。`);
+  let missing = logUnmatchedPosCleanItems_(ss, aggregated.map((r) => r.menuName));
+  notifyUser(
+    `POS整形完了: ${aggregated.length} 商品（ホッピー白/黒: ${hoppeiCount}件）を「${SHEET_NAMES.POS_CLEAN}」に出力。オプション系の変換はログを確認。`
+    + (missing.length > 0 ? ` マスタ未登録の商品名${missing.length}件あり（実行ログ参照）。` : "")
+  );
+};
+
+/**
+ * 整形後POSの統一商品名を レシピ表・中間レシピ表・原材料マスタ の3マスタと突合し、
+ * いずれにも存在しない商品名をログに出す（マスタ登録漏れの検知用。値は書き換えない）。
+ * @return {string[]} どのマスタにも見つからなかった統一商品名（重複なし）
+ */
+const logUnmatchedPosCleanItems_ = (ss, posMenuNames) => {
+  let recipeSheet = ss.getSheetByName(SHEET_NAMES.RECIPE_MASTER);
+  let prepSheet = ss.getSheetByName(SHEET_NAMES.PREPARATION_RECIPE);
+  let rawSheet = ss.getSheetByName(SHEET_NAMES.RAW_MASTER);
+  let nameUnifySheet = ss.getSheetByName(SHEET_NAMES.NAME_UNIFY_MASTER);
+  let unifyMap = loadNameUnifyMaster(nameUnifySheet);
+
+  let recipeMaster = recipeSheet ? loadRecipeMaster(recipeSheet, unifyMap) : {};
+  let preparationRecipes = prepSheet ? loadPreparationRecipes(prepSheet, unifyMap) : {};
+  let rawMaster = rawSheet ? loadRawMaterialMaster(rawSheet) : {};
+
+  let seen = {};
+  let uniqueNames = (posMenuNames || [])
+    .map((n) => String(n == null ? "" : n).trim())
+    .filter((n) => {
+      if (!n || seen[n]) return false;
+      seen[n] = true;
+      return true;
+    });
+
+  let missing = uniqueNames.filter((name) => {
+    return !recipeMaster[name] && !preparationRecipes[name] && !rawMaster[name];
+  });
+
+  if (missing.length === 0) {
+    Logger.log("[POS突合] レシピ表・中間レシピ表・原材料マスタとの突合: 未登録商品なし");
+    return missing;
+  }
+
+  Logger.log(`[POS突合] レシピ表・中間レシピ表・原材料マスタのいずれにも存在しない商品名が${missing.length}件あります: ${missing.join(", ")}`);
+  return missing;
 };
 
 const normalizeProductNameBrackets_ = (s) => {
