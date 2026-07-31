@@ -21,7 +21,7 @@ function onOpen() {
     .addItem("実績取得→翌日の仕込み・発注計算を今すぐ実行（全店舗）", "runDailyPosImportAndPlanNextDay")
     .addItem("スマレジ日次自動取得トリガーを設定（全店舗を毎晩自動処理）", "setupSmaregiDailyTrigger")
     .addSeparator()
-    .addItem("Infomart認可URLを発行（対象店舗のタブを開いてから実行）", "promptInfomartAuthorizationUrl")
+    .addItem("InfomartのPFIDを登録（対象店舗のタブを開いてから実行）", "promptInfomartCredentialRegistration")
     .addItem("Infomart請求書を取得（当日分・対象店舗のタブを開いてから実行）", "runInfomartInvoiceImportToday")
     .addItem("Infomart請求書を取得（日付指定・対象店舗のタブを開いてから実行）", "promptAndImportInfomartInvoices")
     .addItem("Infomart受発注データを取得（日付範囲指定・対象店舗のタブを開いてから実行）", "promptAndImportInfomartOrderDelivery")
@@ -29,6 +29,7 @@ function onOpen() {
     .addItem("祝日キャッシュを更新（1年分取得）", "runRefreshJapaneseHolidayCache")
     .addSeparator()
     .addItem("APIトークンキャッシュをクリア（デバッグ用）", "clearApiTokenCaches")
+    .addItem("AIスナップショットのプロパティだけをクリア（デバッグ用・スクリプトプロパティ上限対策）", "runClearAiSnapshotProperties")
     .addItem("バックログ系データを一括削除（デバッグ用）", "resetBacklogRelatedHistory")
     .addToUi();
 
@@ -49,9 +50,7 @@ function onOpen() {
       setupOrderSheetActionControls_(sheet);
       setupOrderSheetManualInputArea(sheet);
       resetStuckOrderSheetCheckboxIfNeeded_(sheet);
-      clearLegacySheetTriggerCheckboxes_(sheet);
     } else if (isBudgetActualSheetName_(name)) {
-      clearLegacySheetTriggerCheckboxes_(sheet);
       setupBudgetStartDateDropdown_(sheet);
     }
   });
@@ -70,8 +69,11 @@ function runRefreshJapaneseHolidayCache() {
 /**
  * @param {object} [storeSheets] 対象店舗の4シート一式（resolveStoreSheetsFromActiveSheet_ 等で解決済み）。
  *   未指定時はアクティブシートから解決する（メニュー・チェックボックス以外からの直接実行用）。
+ * @param {object} [sharedMasters] loadSharedSimulationMasters_ の戻り値。夜間の全店舗バッチ
+ *   （runDailyPosImportAndPlanNextDay）が店舗ループの外側で1回だけロードした共通マスタを渡すことで、
+ *   店舗数ぶんの重複読み込みを避ける。未指定時はこれまで通りこの関数内でロードする。
  */
-const runSimulationPipeline = (storeSheets) => {
+const runSimulationPipeline = (storeSheets, sharedMasters) => {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   storeSheets = storeSheets || resolveStoreSheetsFromActiveSheet_(ss);
   let runStarted = Date.now();
@@ -112,23 +114,32 @@ const runSimulationPipeline = (storeSheets) => {
     Logger.log(`[run] 棚卸し前日基準: 在庫=${inventoryDateStr} 計算開始=${formatJstDate_(simStartDate)}（棚卸し優先・納品加算なし）`);
   }
 
-  let vendorSheet = ss.getSheetByName(SHEET_NAMES.VENDOR_MASTER);
-  let vendorData = loadSTVendorCalendar(vendorSheet);
+  let vendorData = (sharedMasters && sharedMasters.vendorData)
+    || loadSTVendorCalendar(ss.getSheetByName(SHEET_NAMES.VENDOR_MASTER));
   let maxLt = getMaxVendorLeadTimeDaysFromData_(vendorData);
   let simDays = resolveSimulationDaysIncludingOrderDate(period, simStartDate, orderDate, b3Days, maxLt);
   Logger.log(`[run] D1期間=${period} B2=${formatJstDate_(orderDate)} 棚卸し基準=${formatJstDate_(simStartDate)} シミュレーション=${simDays}日`);
 
   // 2. コンテキスト（各マスタ・棚卸データ）のロード
+  let contextStarted = Date.now();
   let ctx = buildSimulationContext(simStartDate, simDays, period, orderDate, {
     vendorData: vendorData,
+    nameUnifyMap: sharedMasters && sharedMasters.nameUnifyMap,
+    rawMaster: sharedMasters && sharedMasters.rawMaster,
+    prepRecipes: sharedMasters && sharedMasters.prepRecipes,
+    recipeMaster: sharedMasters && sharedMasters.recipeMaster,
+    yieldMap: sharedMasters && sharedMasters.yieldMap,
     inventoryDateStr: inventoryDate ? formatJstDate_(inventoryDate) : null,
     averageSpend: averageSpend,
     storeSheets: storeSheets
   });
   ctx.orderDate = orderDate;
+  Logger.log(`[run] buildSimulationContext 所要時間=${Date.now() - contextStarted}ms`);
 
   // 3. コア計算シミュレーションの実行（バックログの一括更新含む）
+  let simulationStarted = Date.now();
   let simulationResults = executeCoreSimulation(ctx);
+  Logger.log(`[run] executeCoreSimulation 所要時間=${Date.now() - simulationStarted}ms`);
 
   let costRatioRows = writeBudgetFoodCostRatios_(budgetSheet, simulationResults, ctx);
 

@@ -1050,6 +1050,39 @@ const clearAiSnapshotProperties_ = () => {
   return removed;
 };
 
+/**
+ * AIスナップショットのスクリプトプロパティだけを一括削除（メニューから実行）
+ * saveOrderSheetAiSnapshot_ が日次処理のたびに店舗×日付で新規プロパティを作るため、
+ * 運用が長くなるとスクリプトプロパティの上限に近づく。バックログ等の他データは消さずに
+ * これだけをクリアしたい場合はこちらを使う（resetBacklogRelatedHistory は他データも消える）。
+ */
+const runClearAiSnapshotProperties = () => {
+  let removed = clearAiSnapshotProperties_();
+  notifyUser(`AIスナップショットのスクリプトプロパティを ${removed} 件削除しました。`, "AIスナップショットをクリア");
+};
+
+/**
+ * AI_SNAPSHOT_RETENTION_DAYS_ より古いAIスナップショットのプロパティだけを削除する。
+ * キー末尾10文字が buildAiSnapshotPropKey_ で付与した yyyy-MM-dd 形式である前提
+ * （ISO形式の日付文字列は文字列比較でも時系列順と一致するため、Dateへの変換なしで判定できる）。
+ * saveOrderSheetAiSnapshot_ の保存直後に毎回呼び、手動クリアを忘れてもプロパティ数が
+ * 際限なく増えないようにする。
+ */
+const pruneOldAiSnapshotProperties_ = () => {
+  let cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - AI_SNAPSHOT_RETENTION_DAYS_);
+  let cutoffStr = Utilities.formatDate(cutoff, "JST", "yyyy-MM-dd");
+
+  let props = PropertiesService.getScriptProperties();
+  let all = props.getProperties();
+  Object.keys(all).forEach((key) => {
+    if (key.indexOf(AI_SNAPSHOT_PROP_PREFIX) !== 0) return;
+    let dateStr = key.slice(-10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return; // 想定外の形式は安全のため残す
+    if (dateStr < cutoffStr) props.deleteProperty(key);
+  });
+};
+
 /** AI予測手動調整ログのデータ行のみ削除（見出しは残す。sheetは店舗別に解決済みのものを渡す） */
 const clearManualAdjustmentLogData_ = (sheet) => {
   if (!sheet) return 0;
@@ -1259,7 +1292,7 @@ const ensureLot14OrderEntry_ = (todayOrders, rName, rawRow, orderDayIdx, ctx, ho
 };
 
 // ===== DEBUG_SHIODARE_START（デバッグ用・削除可） =====
-const DEBUG_SHIODARE_TRACK_ENABLED_ = true;
+const DEBUG_SHIODARE_TRACK_ENABLED_ = false; // 本番では無効化（有効時、日ごとに原材料展開の再計算が走り重くなる）
 const DEBUG_SHIODARE_RAW_NAME_ = "米";
 const DEBUG_AWASE_SHIODARE_PREP_NAME_ = "ご飯";
 
@@ -1965,6 +1998,9 @@ const ORDER_SHEET_ALT_BG_WHITE = "#ffffff";
 
 const AI_SNAPSHOT_PROP_PREFIX = "AI_SNAPSHOT_";
 
+/** AIスナップショットの保持日数（これより古いキーはsaveOrderSheetAiSnapshot_実行のたびに自動削除） */
+const AI_SNAPSHOT_RETENTION_DAYS_ = 3;
+
 /**
  * 指示書 手動入力エリア（O2:Q15）
  * O2=見出し / O3=原材料名 / O4-O15=手動調整項目（プルダウン含む）
@@ -2212,12 +2248,6 @@ const ORDER_SHEET_ACTION_MENU_ = [
   { label: "④週次原価率計算", action: "runWeeklyFoodCostRatioPipeline" }
 ];
 
-/** 旧方式のチェックボックス列（E1/I1=指示書, F1=予算・実績）— 開いたときにオフへ */
-const LEGACY_TRIGGER_CHECKBOX_COLS_ = {
-  "指示書": [5, 9],
-  "予算・実績": [6]
-};
-
 const CHECKBOX_SKIP_PROPS_ = {
   ORDER_FORM: "SKIP_ORDER_SHEET_ONEDIT",
   BUDGET_ACTUAL: "SKIP_BUDGET_ACTUAL_ONEDIT"
@@ -2312,44 +2342,17 @@ const setupOrderSheetActionControls_ = (sheet) => {
   }
 };
 
-/** 旧トリガー列のチェックボックスをオフ（移行用） */
-const clearLegacySheetTriggerCheckboxes_ = (sheet) => {
-  if (!sheet) return;
-  let parsed = parseStoreSheetName_(sheet.getName());
-  let legacyKey = parsed ? parsed.baseName : sheet.getName();
-  let cols = LEGACY_TRIGGER_CHECKBOX_COLS_[legacyKey];
-  if (!cols || cols.length === 0) return;
-
-  let skipKey = legacyKey === SHEET_NAMES.ORDER_FORM
-    ? CHECKBOX_SKIP_PROPS_.ORDER_FORM
-    : CHECKBOX_SKIP_PROPS_.BUDGET_ACTUAL;
-  let props = PropertiesService.getScriptProperties();
-  props.setProperty(skipKey, "1");
-  try {
-    cols.forEach((col) => {
-      uncheckRangeSafely(sheet.getRange(1, col));
-    });
-    SpreadsheetApp.flush();
-  } finally {
-    props.deleteProperty(skipKey);
-  }
-};
-
-/** 範囲内のチェックボックスをすべてオフにする */
+/** 範囲内のチェックボックスをすべてオフにする（flushは呼び出し元でループの後に1回だけ行う） */
 const uncheckRangeSafely = (range) => {
   if (!range) return;
-  let cleared = false;
   try {
     range.uncheck();
-    cleared = true;
   } catch (e) {
     // uncheck 非対応・混在範囲時は setValue(false) へ
   }
   if (range.getValue() === true) {
     range.setValue(false);
-    cleared = true;
   }
-  if (cleared) SpreadsheetApp.flush();
 };
 
 /** 指示書 B1 実行チェックボックスをオフにする */
@@ -2772,6 +2775,7 @@ const saveOrderSheetAiSnapshot_ = (orderDate, dayForSheet, ctx, storeName) => {
     buildAiSnapshotPropKey_(dateStr, storeName),
     JSON.stringify(snapshot)
   );
+  pruneOldAiSnapshotProperties_();
 };
 
 /** 店舗名がある場合はプロパティキーに含める（店舗別シート運用時の衝突防止。全店舗共有のスクリプトプロパティのため） */

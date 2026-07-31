@@ -21,6 +21,15 @@
 
 const ACTUAL_SALES_LOG_HEADERS_ = ["日付", "店舗", "統一商品名", "販売点数", POS_SALES_HEADER_EX_TAX];
 
+/**
+ * 実績出数ログの保持日数。シミュレーション側が参照するのは商品別バイアス係数の
+ * 遡り参照分（SALES_BIAS_LOOKBACK_DAYS_の2倍=28日、load.gs参照）だけなので、
+ * 十分な余裕を持たせて90日にしている。これを超える古い行はwriteActualSalesLogForDate_の
+ * たびに削除する（元データはスマレジ側に残るため、必要なら「スマレジ実績を再取得」で戻せる）。
+ * 無制限に増え続けると、毎晩・店舗ごとに発生する全件読み書きがどんどん重くなるため。
+ */
+const ACTUAL_SALES_LOG_RETENTION_DAYS_ = 90;
+
 /** 対象店舗を選択する予算・実績シートのセル */
 const SMAREGI_STORE_LABEL_CELL_ = "C1";
 const SMAREGI_STORE_DROPDOWN_CELL_ = "D1";
@@ -272,14 +281,22 @@ const ensureActualSalesLogSheet_ = (ss) => {
   return sheet;
 };
 
-/** 指定日付+店舗の既存行を削除し、集計済み行に置き換える（同日同店舗の再取得は上書き。他店舗は保持） */
+/**
+ * 指定日付+店舗の既存行を削除し、集計済み行に置き換える（同日同店舗の再取得は上書き。他店舗は保持）
+ * 併せて ACTUAL_SALES_LOG_RETENTION_DAYS_ より古い行もここで削除し、シートが無制限に
+ * 肥大化しないようにする（古いほど毎晩の全件読み書きコストが増えるため）。
+ */
 const writeActualSalesLogForDate_ = (sheet, dateStr, storeId, aggregatedRows) => {
   let lastRow = sheet.getLastRow();
   let keptRows = [];
   if (lastRow >= 2) {
+    let retentionCutoff = addDaysToDateStr_(dateStr, -ACTUAL_SALES_LOG_RETENTION_DAYS_);
     let existing = sheet.getRange(2, 1, lastRow - 1, ACTUAL_SALES_LOG_HEADERS_.length).getValues();
     keptRows = existing.filter((row) => {
-      return !(formatSheetDateToKey(row[0]) === dateStr && String(row[1]) === String(storeId));
+      let rowDateStr = formatSheetDateToKey(row[0]);
+      if (rowDateStr === dateStr && String(row[1]) === String(storeId)) return false; // 同日同店舗は置き換え
+      if (rowDateStr && rowDateStr < retentionCutoff) return false; // 保持期間切れ
+      return true;
     });
   }
 
@@ -305,8 +322,7 @@ const writeActualSalesLogForDate_ = (sheet, dateStr, storeId, aggregatedRows) =>
  * 確定済みの合計金額）を合算して使う。明細の税抜換算を1行ずつ行うと端数処理が積み重なり
  * 実際のPOS集計とズレるため、合計は取引単位でまとめてから1回だけ税抜換算する。
  * 商品別の内訳（実績出数ログ用の数量・按分金額）は引き続き明細行から作る。
- */
-/**
+ *
  * @param {string} dateStr
  * @param {object} store {storeId, storeName}
  * @param {Sheet} [budgetSheetOverride] 明示的に対象店舗の予算・実績シートを指定する場合
@@ -374,6 +390,8 @@ const runDailyPosImportAndPlanNextDay = () => {
   let tomorrow = addDaysToDateStr_(today, 1);
   let succeeded = [];
   let failed = [];
+  // 原材料・レシピ・歩留まり・名寄せ・仕入先カレンダーは店舗間で共通のため、店舗ループの外側で1回だけ読み込む
+  let sharedMasters = loadSharedSimulationMasters_(ss);
 
   stores.forEach((store) => {
     let storeName = String(store.storeName || "").trim();
@@ -386,7 +404,7 @@ const runDailyPosImportAndPlanNextDay = () => {
 
       importSmaregiDailyActuals_(today, store, storeSheets.budgetSheet);
       storeSheets.orderSheet.getRange("B2").setValue(new Date(`${tomorrow}T12:00:00`));
-      runSimulationPipeline(storeSheets);
+      runSimulationPipeline(storeSheets, sharedMasters);
       succeeded.push(storeName);
     } catch (err) {
       failed.push(`${storeName || store.storeId}: ${err.message}`);

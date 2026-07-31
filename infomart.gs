@@ -4,34 +4,32 @@
  * 目的: 請求書データ・受発注/納品データを店舗ごとに取得し、可視化用のログシートへ書き込む。
  * 発注データの送信（フェーズ2）は社内承認待ちのため本ファイルでは未実装（末尾の拡張ポイント参照）。
  *
- * 認証方式について: インフォマート公式の「OAuth2.0 認証手順」PDFで確認したところ、
- * 存在するのは①ブラウザでPFID（ログインID）・パスワードを直接入力する「認可コードフロー」と、
- * ②その結果得られるリフレッシュトークンでアクセストークンを再発行する方式の2つのみ。
- * user_id/user_passwordを直接POSTする「クレデンシャルズフロー」は存在しない（過去にそれで
- * 実装し401エラーになったため、正式な認可コードフローに作り直した経緯がある）。
- * そのため「ログインID・パスワードをこのシステムが保存する」ことは無く、店舗ごとに一度だけ
- * ブラウザで認可し、以後はリフレッシュトークン（使うたびにローテーションする）で運用する。
+ * 認証方式について: インフォマート公式APIリファレンス（認証・認可）に基づき、
+ * 「リソースオーナー・パスワード・クレデンシャルズフロー」（POST /api/credentials/access_token、
+ * grant_type不要の専用エンドポイント）を採用。ブラウザでの認可操作・コールバックURLの登録が
+ * 不要になる代わりに、店舗ごとのPFID（ログインID・パスワード）をスクリプトプロパティに保存する
+ * （setInfomartCredentialForStore_）。
+ * 取得したアクセストークンにはリフレッシュトークンも付随し、以後は認可コードフローと共通の
+ * リフレッシュ処理（POST /openam/oauth2/access_token, grant_type=refresh_token）で更新する。
+ * リフレッシュトークンが失効・未取得の場合は自動的にクレデンシャルズフローへフォールバックして
+ * 再取得するため、手動での再認可操作は基本的に不要（PFIDのパスワードを変更した場合を除く）。
  *
- * 店舗ごとに異なるのはこのリフレッシュトークンのみで、client_id/client_secret はAPI利用申請時に
- * 会社単位で発行される想定のため全店舗共通。対象店舗の選択はスマレジ連携と共用で「予算・実績」
- * シート D1（SMAREGI_STORE_DROPDOWN_CELL_、smaregi.gs参照）のプルダウンをそのまま使う。
+ * 店舗ごとに異なるのはPFID（ログインID・パスワード）とリフレッシュトークンのみで、
+ * client_id/client_secret はAPI利用申請時に会社単位で発行される想定のため全店舗共通。
+ * 対象店舗の選択はスマレジ連携と共用で「予算・実績」シート D1
+ * （SMAREGI_STORE_DROPDOWN_CELL_、smaregi.gs参照）のプルダウンをそのまま使う。
  *
  * 事前準備（このファイルのコードだけでは完結しない）:
  * 1. Apps Script エディタ → プロジェクトの設定 → スクリプトプロパティに以下を設定（値はコードに書かない）:
  *    - INFOMART_CLIENT_ID / INFOMART_CLIENT_SECRET: 全店舗共通のクライアントID/シークレット
- *    - INFOMART_REDIRECT_URI: 下記2で発行するWebアプリのURL（.../exec）
- *    - INFOMART_REFRESH_TOKENS: 店舗ごとの認可完了後、doGet()が自動で書き込む
- *      （店舗名→リフレッシュトークンのJSONマップ。手動で用意する必要はない）
- * 2. Apps Script エディタ →「デプロイ」→「新しいデプロイ」→ 種類「ウェブアプリ」、
- *    実行ユーザー「自分」、アクセスできるユーザー「全員」でデプロイし、発行されたURLを
- *    INFOMART_REDIRECT_URI に設定する（clasp push だけではこのURLは変わらない）。
- * 3. そのURLを、インフォマートの契約担当窓口・API申請の担当者に連絡し、
- *    コールバックURL（redirect_uri）として登録してもらう（未登録の場合は新規登録依頼が必要）。
- * 4. メニュー「発注管理」→「スマレジ店舗一覧を更新」でD1の選択肢を用意し、対象店舗を選択
- * 5. メニュー「発注管理」→「Infomart認可URLを発行」を実行し、表示されたリンクをクリックして
- *    その店舗のPFID・パスワードでログイン（店舗ごとに一度だけ必要）
- * 6. constants.gs の INFOMART_CONFIG.useTestEnv でテスト環境/本番環境を切り替える
- * 7. test.js の runDiagnoseInfomart* を Apps Script エディタから実行し、
+ *    - INFOMART_REFRESH_TOKENS / INFOMART_CREDENTIALS: いずれもコードが自動で読み書きするため
+ *      手動で用意する必要はない
+ * 2. メニュー「発注管理」→「スマレジ店舗一覧を更新」でD1の選択肢を用意し、対象店舗を選択
+ * 3. メニュー「発注管理」→「InfomartのPFIDを登録」を実行し、その店舗のPFID・パスワードを登録
+ *    （店舗ごとに一度でよいが、PFIDのパスワードを変更した場合は再登録が必要）
+ *    ※ ui.prompt はパスワードをマスク表示できないため、入力時は周囲の視認に注意すること
+ * 4. constants.gs の INFOMART_CONFIG.useTestEnv でテスト環境/本番環境を切り替える
+ * 5. test.js の runDiagnoseInfomart* を Apps Script エディタから実行し、
  *    実データの形状を確認してから本番運用に入る
  *
  * 既知の未確認事項（初回の本番呼び出し前に要確認。詳細はプラン参照）:
@@ -41,6 +39,8 @@
  * - 非同期ジョブの実際の完了時間（ポーリング間隔・上限回数の妥当性）
  * - リフレッシュトークンの有効期限は31日。使うたびに新しいものへローテーションされるため、
  *   最低でも月1回はいずれかのAPIを呼び出す運用にしておかないと知らないうちに失効しうる
+ *   （失効してもPFID・パスワードは保存済みのため、次回呼び出し時に自動でクレデンシャルズ
+ *   フローから再取得される）
  *
  * インフォマートAPI共通仕様の注意点: クエリ文字列・ボディ情報中の
  * % ^ * ( ) [ ] < > ' " タブ カンマ は送信時に自動で除去される。
@@ -60,11 +60,12 @@ const INFOMART_ORDER_DELIVERY_LOG_HEADERS_ = [
 /** 店舗ごとのリフレッシュトークンをまとめて持つスクリプトプロパティ（店舗名→リフレッシュトークン文字列） */
 const INFOMART_REFRESH_TOKENS_PROP_ = "INFOMART_REFRESH_TOKENS";
 
+/** 店舗ごとのPFID（ログインID・パスワード）をまとめて持つスクリプトプロパティ
+ *  （店舗名→{userId, userPassword}のJSONマップ。クレデンシャルズフローの初回取得・再ブートストラップに使う） */
+const INFOMART_CREDENTIALS_PROP_ = "INFOMART_CREDENTIALS";
+
 /** タイムアウトしたバッチジョブのIDを店舗ごとに一時保存するスクリプトプロパティのプレフィックス（次回実行時の再確認用） */
 const INFOMART_ORDER_LAST_BATCH_ID_PROP_PREFIX_ = "INFOMART_ORDER_LAST_BATCH_ID_";
-
-/** OAuth2.0で要求する固定スコープ（インフォマートAPIを利用する場合は固定値） */
-const INFOMART_OAUTH_SCOPE_ = "openid profile email qualified";
 
 /** スクリプトプロパティから全店舗共通のクライアントID/シークレットを読む（未設定ならエラー） */
 const getInfomartClientCredentials_ = () => {
@@ -80,18 +81,6 @@ const getInfomartClientCredentials_ = () => {
   return { clientId: clientId, clientSecret: clientSecret };
 };
 
-/** スクリプトプロパティから認可コールバックURル（Webアプリのデプロイ先）を読む（未設定ならエラー） */
-const getInfomartRedirectUri_ = () => {
-  let uri = PropertiesService.getScriptProperties().getProperty("INFOMART_REDIRECT_URI");
-  if (!uri) {
-    throw new Error(
-      "スクリプトプロパティに INFOMART_REDIRECT_URI が設定されていません。"
-      + "このプロジェクトをウェブアプリとしてデプロイし、発行されたURLを登録してください。"
-    );
-  }
-  return uri;
-};
-
 /** スクリプトプロパティから店舗別リフレッシュトークンマップを読む（未設定なら空マップ扱い） */
 const getInfomartRefreshTokenMap_ = () => {
   let raw = PropertiesService.getScriptProperties().getProperty(INFOMART_REFRESH_TOKENS_PROP_);
@@ -103,34 +92,52 @@ const getInfomartRefreshTokenMap_ = () => {
   }
 };
 
-/** 指定店舗のリフレッシュトークンを取得（未認可ならメニューでの認可を促すエラー） */
-const getInfomartRefreshTokenForStore_ = (storeName) => {
-  let map = getInfomartRefreshTokenMap_();
-  let token = map[storeName];
-  if (!token) {
-    throw new Error(
-      `店舗「${storeName}」はまだインフォマートAPIの認可が完了していません。`
-      + "メニュー「発注管理」→「Infomart認可URLを発行」から認可を行ってください。"
-    );
-  }
-  return token;
-};
-
-/** 指定店舗のリフレッシュトークンを保存（ローテーション対応。認可時・再発行時どちらでも呼ぶ） */
+/** 指定店舗のリフレッシュトークンを保存（ローテーション対応。初回取得時・再発行時どちらでも呼ぶ） */
 const setInfomartRefreshTokenForStore_ = (storeName, refreshToken) => {
   let map = getInfomartRefreshTokenMap_();
   map[storeName] = refreshToken;
   PropertiesService.getScriptProperties().setProperty(INFOMART_REFRESH_TOKENS_PROP_, JSON.stringify(map));
 };
 
+/** スクリプトプロパティから店舗別PFID（ログインID・パスワード）マップを読む（未設定なら空マップ扱い） */
+const getInfomartCredentialMap_ = () => {
+  let raw = PropertiesService.getScriptProperties().getProperty(INFOMART_CREDENTIALS_PROP_);
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`${INFOMART_CREDENTIALS_PROP_} のJSON形式が不正です: ${err.message}`);
+  }
+};
+
+/** 指定店舗のPFID（ログインID・パスワード）を取得（未登録ならメニューでの登録を促すエラー） */
+const getInfomartCredentialForStore_ = (storeName) => {
+  let map = getInfomartCredentialMap_();
+  let cred = map[storeName];
+  if (!cred || !cred.userId || !cred.userPassword) {
+    throw new Error(
+      `店舗「${storeName}」はまだインフォマートのPFIDが登録されていません。`
+      + "メニュー「発注管理」→「InfomartのPFIDを登録」から登録してください。"
+    );
+  }
+  return cred;
+};
+
+/** 指定店舗のPFID（ログインID・パスワード）を保存 */
+const setInfomartCredentialForStore_ = (storeName, userId, userPassword) => {
+  let map = getInfomartCredentialMap_();
+  map[storeName] = { userId: userId, userPassword: userPassword };
+  PropertiesService.getScriptProperties().setProperty(INFOMART_CREDENTIALS_PROP_, JSON.stringify(map));
+};
+
 /**
  * 「予算・実績」D1（スマレジ店舗選択と共用、smaregi.gsのparseSmaregiStoreCellValue_で解析）から
- * 対象店舗名を解決する。D1が未選択、またはその店舗がまだ認可されていない場合はエラー。
+ * 対象店舗名を解決する。D1が未選択、またはその店舗のPFIDがまだ登録されていない場合はエラー。
  */
 const resolveSelectedInfomartStoreName_ = (budgetSheet) => {
   let store = resolveSelectedSmaregiStore_(budgetSheet);
-  // 認可済みかどうかを先に検証しておく（未認可の店舗名でトークン取得に進んでしまうのを防ぐ）
-  getInfomartRefreshTokenForStore_(store.storeName);
+  // PFID登録済みかどうかを先に検証しておく（未登録の店舗名でトークン取得に進んでしまうのを防ぐ）
+  getInfomartCredentialForStore_(store.storeName);
   return store.storeName;
 };
 
@@ -139,103 +146,82 @@ const infomartAuthBase_ = () => {
 };
 
 /**
- * 対象店舗の認可コードフロー開始URLを組み立てる（ブラウザでこのURLを開き、PFID・パスワードで
- * ログインすると、Webアプリ側のdoGet()にリダイレクトされ認可が完了する）
+ * 「予算・実績」D1で選択中の店舗のPFID（ログインID・パスワード）を登録する（メニューから実行）
+ * 店舗ごとに一度でよいが、PFIDのパスワードを変更した場合は再登録が必要。
+ * ui.prompt はマスク入力に対応していないため、周囲に見られない環境で入力すること。
  */
-const buildInfomartAuthorizationUrl_ = (storeName) => {
-  let clientCred = getInfomartClientCredentials_();
-  let redirectUri = getInfomartRedirectUri_();
-  let params = [
-    "realm=" + encodeURIComponent(INFOMART_CONFIG.realm),
-    "client_id=" + encodeURIComponent(clientCred.clientId),
-    "redirect_uri=" + encodeURIComponent(redirectUri),
-    "response_type=code",
-    "scope=" + encodeURIComponent(INFOMART_OAUTH_SCOPE_),
-    "state=" + encodeURIComponent(storeName),
-    "access_type=offline"
-  ];
-  return `${infomartAuthBase_()}/openam/oauth2/authorize?${params.join("&")}`;
-};
-
-/**
- * 「予算・実績」D1で選択中の店舗の認可URLをダイアログで表示する（メニューから実行）
- * 店舗ごとに一度だけ必要な操作。リンクをクリックしてその店舗のPFID・パスワードでログインすると、
- * doGet() が認可コードを受け取ってリフレッシュトークンを保存する。
- */
-const promptInfomartAuthorizationUrl = () => {
+const promptInfomartCredentialRegistration = () => {
   let budgetSheet = resolveStoreSheetsFromActiveSheet_().budgetSheet;
   let store = resolveSelectedSmaregiStore_(budgetSheet);
-  let url = buildInfomartAuthorizationUrl_(store.storeName);
+  let ui = SpreadsheetApp.getUi();
 
-  let html = HtmlService.createHtmlOutput(
-    `<p>店舗「${store.storeName}」のインフォマート認可を行います。</p>`
-    + `<p><a href="${url}" target="_blank">こちらをクリックして認可画面を開く</a></p>`
-    + `<p>その店舗のPFID（ログインID）とパスワードでログインしてください。</p>`
-  ).setWidth(420).setHeight(200);
-  SpreadsheetApp.getUi().showModalDialog(html, "Infomart認可URLを発行");
+  let idRes = ui.prompt(
+    "InfomartのPFIDを登録",
+    `店舗「${store.storeName}」のPFID（ログインID）を入力してください。`,
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (idRes.getSelectedButton() !== ui.Button.OK) return;
+  let userId = String(idRes.getResponseText() || "").trim();
+  if (!userId) {
+    ui.alert("PFIDが空のため登録を中止しました。");
+    return;
+  }
+
+  let pwRes = ui.prompt(
+    "InfomartのPFIDを登録",
+    `店舗「${store.storeName}」のパスワードを入力してください。\n（入力内容はマスクされません。周囲にご注意ください）`,
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (pwRes.getSelectedButton() !== ui.Button.OK) return;
+  let userPassword = String(pwRes.getResponseText() || "").trim();
+  if (!userPassword) {
+    ui.alert("パスワードが空のため登録を中止しました。");
+    return;
+  }
+
+  setInfomartCredentialForStore_(store.storeName, userId, userPassword);
+  ui.alert(`店舗「${store.storeName}」のPFIDを登録しました。`);
 };
 
 /**
- * OAuth2.0 認可コールバック（Webアプリとしてデプロイした場合のエントリポイント）
- * インフォマートの認可画面でログイン後、ここへ code（許可コード）・state（店舗名）付きで
- * リダイレクトされる。code を使ってアクセストークン・リフレッシュトークンを発行し、
- * リフレッシュトークンを店舗名キーで保存する。
+ * クレデンシャルズフローでアクセストークンを新規発行する（PFIDのuser_id/user_passwordを直接POST）
+ * リフレッシュトークンが無い初回、またはリフレッシュトークンが失効した場合のフォールバックとして使う。
  */
-const doGet = (e) => {
-  let params = (e && e.parameter) || {};
-  if (params.error) {
-    return HtmlService.createHtmlOutput(`<p>認可が拒否またはエラーになりました: ${params.error}</p>`);
-  }
-  let code = params.code;
-  let storeName = params.state;
-  if (!code || !storeName) {
-    return HtmlService.createHtmlOutput("<p>不正なコールバックです（code/stateが不足しています）。</p>");
-  }
-
-  try {
-    let clientCred = getInfomartClientCredentials_();
-    let redirectUri = getInfomartRedirectUri_();
-    let res = UrlFetchApp.fetch(`${infomartAuthBase_()}/openam/oauth2/access_token?realm=${encodeURIComponent(INFOMART_CONFIG.realm)}`, {
-      method: "post",
-      contentType: "application/x-www-form-urlencoded",
-      payload: {
-        grant_type: "authorization_code",
-        code: code,
-        redirect_uri: redirectUri,
-        client_id: clientCred.clientId,
-        client_secret: clientCred.clientSecret
-      },
-      muteHttpExceptions: true
-    });
-
-    let status = res.getResponseCode();
-    if (status !== 200) {
-      return HtmlService.createHtmlOutput(`<p>アクセストークン取得に失敗しました。status=${status} body=${res.getContentText().slice(0, 500)}</p>`);
-    }
-
-    let json = JSON.parse(res.getContentText());
-    setInfomartRefreshTokenForStore_(storeName, json.refresh_token);
-    Logger.log(`[Infomart認可] 店舗=${storeName} 認可完了`);
-    return HtmlService.createHtmlOutput(`<p>店舗「${storeName}」の認可が完了しました。このタブは閉じて構いません。</p>`);
-  } catch (err) {
-    return HtmlService.createHtmlOutput(`<p>認可処理でエラーが発生しました: ${err.message}</p>`);
-  }
-};
-
-/**
- * リフレッシュトークンを使って店舗別のアクセストークンを取得（有効期限-60秒でキャッシュ）
- * アクセストークン発行のたびにリフレッシュトークンもローテーション（新しい値に入れ替わる）
- * ため、成功時は必ず setInfomartRefreshTokenForStore_ で保存し直す。
- */
-const getInfomartAccessToken_ = (storeName) => {
-  let cache = CacheService.getScriptCache();
-  let cacheKey = "infomart_token_" + storeName;
-  let cached = cache.get(cacheKey);
-  if (cached) return cached;
-
-  let refreshToken = getInfomartRefreshTokenForStore_(storeName);
+const fetchInfomartAccessTokenViaCredentials_ = (storeName) => {
   let clientCred = getInfomartClientCredentials_();
+  let cred = getInfomartCredentialForStore_(storeName);
 
+  let res = UrlFetchApp.fetch(`${infomartAuthBase_()}/api/credentials/access_token`, {
+    method: "post",
+    contentType: "application/x-www-form-urlencoded",
+    payload: {
+      user_id: cred.userId,
+      user_password: cred.userPassword,
+      client_id: clientCred.clientId,
+      client_secret: clientCred.clientSecret,
+      realm: INFOMART_CONFIG.realm,
+      response_type: "json"
+    },
+    muteHttpExceptions: true
+  });
+
+  let code = res.getResponseCode();
+  if (code !== 200) {
+    throw new Error(
+      `インフォマート クレデンシャルズフローでのアクセストークン取得失敗 [店舗=${storeName}] `
+      + `status=${code} body=${res.getContentText().slice(0, 500)}\n`
+      + "登録済みのPFID・パスワードが正しいか確認してください（メニュー「InfomartのPFIDを登録」で再登録可能）。"
+    );
+  }
+  return JSON.parse(res.getContentText());
+};
+
+/**
+ * リフレッシュトークンを使ってアクセストークンを再発行する（失敗時はnullを返し、
+ * 呼び出し元でクレデンシャルズフローへのフォールバックを行わせる）
+ */
+const refreshInfomartAccessTokenWithToken_ = (refreshToken, storeName) => {
+  let clientCred = getInfomartClientCredentials_();
   let res = UrlFetchApp.fetch(`${infomartAuthBase_()}/openam/oauth2/access_token?realm=${encodeURIComponent(INFOMART_CONFIG.realm)}`, {
     method: "post",
     contentType: "application/x-www-form-urlencoded",
@@ -249,15 +235,31 @@ const getInfomartAccessToken_ = (storeName) => {
     muteHttpExceptions: true
   });
 
-  let code = res.getResponseCode();
-  if (code !== 200) {
-    throw new Error(
-      `インフォマート アクセストークン再発行失敗 [店舗=${storeName}] status=${code} body=${res.getContentText().slice(0, 500)}\n`
-      + "リフレッシュトークンが失効した可能性があります。メニューの「Infomart認可URLを発行」から再認可してください。"
-    );
+  if (res.getResponseCode() !== 200) {
+    Logger.log(`[Infomart] 店舗=${storeName} リフレッシュトークンでの再発行に失敗。クレデンシャルズフローへフォールバックします。status=${res.getResponseCode()} body=${res.getContentText().slice(0, 300)}`);
+    return null;
+  }
+  return JSON.parse(res.getContentText());
+};
+
+/**
+ * 店舗別のアクセストークンを取得（有効期限-60秒でキャッシュ）
+ * 既にリフレッシュトークンがあればそれで再発行し、無い（または失効して再発行に失敗した）場合は
+ * 登録済みのPFID・パスワードを使ったクレデンシャルズフローで新規取得する。
+ * どちらの経路でも、取得のたびにリフレッシュトークンがローテーションされるため必ず保存し直す。
+ */
+const getInfomartAccessToken_ = (storeName) => {
+  let cache = CacheService.getScriptCache();
+  let cacheKey = "infomart_token_" + storeName;
+  let cached = cache.get(cacheKey);
+  if (cached) return cached;
+
+  let refreshToken = getInfomartRefreshTokenMap_()[storeName];
+  let json = refreshToken ? refreshInfomartAccessTokenWithToken_(refreshToken, storeName) : null;
+  if (!json) {
+    json = fetchInfomartAccessTokenViaCredentials_(storeName);
   }
 
-  let json = JSON.parse(res.getContentText());
   let accessToken = json.access_token;
   let expiresIn = Number(json.expires_in) || 300;
   setInfomartRefreshTokenForStore_(storeName, json.refresh_token); // ローテーションされた新しいリフレッシュトークンを保存
@@ -299,9 +301,25 @@ const infomartApiPost_ = (url, bodyParams, storeName) => {
 // 請求書（読み取り）
 // ---------------------------------------------------------------------------
 
-/** 指定店舗・指定日に送信された請求書を検索取得（ページング対応） */
+/** 指定店舗・指定日に受け取った請求書を検索取得（ページング対応） */
 const fetchInfomartInvoicesForDate_ = (dateStr, storeName) => {
-  let url = `${INFOMART_CONFIG.invoiceApiBase}/wi/v2/seller/invoice/search`;
+  return fetchInfomartInvoicesForDateRange_(dateStr, dateStr, storeName);
+};
+
+/**
+ * 指定店舗・指定期間（reception_date_from〜reception_date_to、受取日基準）に受け取った
+ * 請求書を検索取得（ページング対応）。fetchInfomartInvoicesForDate_ の日付範囲版。
+ * 親アカウント運用時に複数店舗ぶんのデータが混在して返ってきていないかをまとめて確認する
+ * 診断用途（diagnoseInfomartStoreScope_）でも使う。
+ *
+ * 注意: 以前は /wi/v2/seller/invoice/search（発行請求書＝自社が発行する側、有料の発行プランが
+ * 必要）を呼んでいたが、"本機能は発行有料企業のみ利用可能です"(403/E100001)で失敗した。
+ * 当店は仕入先から請求書を受け取る側（買い手）なので、正しくは受取請求書側の
+ * POST /wi/v2/buyer/invoice/search（「請求データ取得」API）を使う。パラメータ名・
+ * レスポンスの配列キー（invoice_list→invdata）も発行側とは異なる。
+ */
+const fetchInfomartInvoicesForDateRange_ = (dateFrom, dateTo, storeName) => {
+  let url = `${INFOMART_CONFIG.invoiceApiBase}/wi/v2/buyer/invoice/search`;
   let invoices = [];
   let getCount = 99;
   let maxPages = 50; // 安全弁（想定外の応答形式での無限ループを防ぐ）
@@ -309,12 +327,12 @@ const fetchInfomartInvoicesForDate_ = (dateStr, storeName) => {
   for (let page = 0; page < maxPages; page++) {
     let startPosition = page * getCount + 1;
     let json = infomartApiPost_(url, {
-      send_date_from: dateStr,
-      send_date_to: dateStr,
+      reception_date_from: dateFrom,
+      reception_date_to: dateTo,
       start_position: startPosition,
       get_count: getCount
     }, storeName);
-    let pageInvoices = Array.isArray(json.invoice_list) ? json.invoice_list : (Array.isArray(json.list) ? json.list : []);
+    let pageInvoices = Array.isArray(json.invdata) ? json.invdata : [];
     if (pageInvoices.length === 0) break;
     invoices = invoices.concat(pageInvoices);
     if (pageInvoices.length < getCount) break;
@@ -370,6 +388,16 @@ const writeInfomartInvoiceLogForDate_ = (sheet, dateStr, storeName, rows) => {
 };
 
 /** 請求書1件を「明細1行=1行」に展開する（明細が無い請求書は明細列を空欄にして1行にする） */
+/**
+ * 未検証・要修正: この関数は旧・発行側API（/wi/v2/seller/invoice/search）のレスポンス形状
+ * （invoice.customer / invoice.publisher オブジェクト）を前提にしたマッピングのままで、
+ * 現在使っている受取側API（/wi/v2/buyer/invoice/search）の "invdata[]" 要素の実際の形状は
+ * まだ確認できていない（request_type一覧に company_name_s / burden_sec_code 等が見えるのみで
+ * response側のフィールド名は未公開）。runDiagnoseInfomartInvoices・
+ * runDiagnoseInfomartStoreScope で生JSONを確認してから、このマッピングを実データに合わせて
+ * 書き直すこと。現状のままだと本番取込（importInfomartInvoicesForDate_）は空欄だらけの行を
+ * 書き込む可能性が高い。
+ */
 const flattenInfomartInvoiceToRows_ = (invoice) => {
   let customer = invoice.customer || {};
   let publisher = invoice.publisher || {};
@@ -442,8 +470,14 @@ const promptAndImportInfomartInvoices = () => {
 // 受発注・納品データ（読み取り、非同期ジョブ: request → check → get）
 // ---------------------------------------------------------------------------
 
-/** 取引データダウンロードを依頼（非同期ジョブの開始） */
-const requestInfomartOrderDeliveryExtract_ = (dateFrom, dateTo, targetDateSet, statusCodes, storeName) => {
+/**
+ * 取引データダウンロードを依頼（非同期ジョブの開始）
+ * memberCodes: 「自社会員システムコード」(member_codes、半角8桁)。このAPIでは未指定時「全て」扱いの
+ * はずだが、実際に日次発注しているアカウントでも0件が続いたため切り分け用に明示指定できるようにした。
+ * statusSet: 「伝票種別」(status_set)。未指定時は「0:通常＋仕入伝票」扱いになり、承認待ちの
+ * 「3:申請発注」「4:発注予定」等は対象外になる。record_countが0件続きの切り分け用に追加。
+ */
+const requestInfomartOrderDeliveryExtract_ = (dateFrom, dateTo, targetDateSet, statusCodes, storeName, memberCodes, statusSet) => {
   let url = `${INFOMART_CONFIG.apiBase}/ordApi/order/trade/download/request`;
   let body = {
     target_date_set: targetDateSet,
@@ -451,26 +485,31 @@ const requestInfomartOrderDeliveryExtract_ = (dateFrom, dateTo, targetDateSet, s
     target_date_to: dateTo
   };
   if (statusCodes && statusCodes.length > 0) body.status_code = statusCodes;
+  if (memberCodes && memberCodes.length > 0) body.member_codes = memberCodes;
+  if (statusSet != null) body.status_set = statusSet;
   let json = infomartApiPost_(url, body, storeName);
   return { requestId: json.request_id, batchId: json.batch_id };
 };
 
-/** ジョブの状態を1回確認する */
+/** ジョブの状態を1回確認する（成功時のレスポンスは request_id/result/error_list/batch_flg/record_count） */
 const checkInfomartOrderDeliveryBatch_ = (batchId, storeName) => {
   let url = `${INFOMART_CONFIG.apiBase}/ordApi/order/trade/download/check`;
   return infomartApiPost_(url, { batch_id: batchId }, storeName);
 };
 
-/** 完了したジョブの結果データを取得する */
-const getInfomartOrderDeliveryResult_ = (batchId, storeName) => {
+/**
+ * 完了したジョブの結果データを取得する（連番範囲 seq_from/seq_to は必須。1回の取得件数に上限が
+ * ある前提でページングする想定のため、この関数は1ページぶんだけを返す）
+ */
+const getInfomartOrderDeliveryResult_ = (batchId, seqFrom, seqTo, storeName) => {
   let url = `${INFOMART_CONFIG.apiBase}/ordApi/order/trade/download/get`;
-  return infomartApiPost_(url, { batch_id: batchId }, storeName);
+  return infomartApiPost_(url, { batch_id: batchId, seq_from: String(seqFrom), seq_to: String(seqTo) }, storeName);
 };
 
 /**
  * ジョブの完了を同一関数内で短時間ポーリングする（GAS実行時間上限[約6分]に対し十分余裕を持たせる）
- * 未確認事項: 実際のジョブ完了時間・「準備完了」判定フィールド名は本番疎通確認で要検証
- * （現状は check の結果に result===0 以外、または status 系フィールドが含まれる想定でログ出力しつつ緩めに待つ）
+ * 「準備完了」判定は check レスポンスの result==="0"（かつ status系フィールドは存在しないため
+ * その他の判定条件は付けない）で行う。record_count（対象件数）もここで取得できる。
  */
 const pollInfomartOrderDeliveryUntilReady_ = (batchId, storeName) => {
   let maxAttempts = 15;
@@ -481,7 +520,7 @@ const pollInfomartOrderDeliveryUntilReady_ = (batchId, storeName) => {
     if (Date.now() > deadline) break;
     let status = checkInfomartOrderDeliveryBatch_(batchId, storeName);
     Logger.log(`[Infomart受発注] 店舗=${storeName} batch_id=${batchId} check#${attempt}: ${JSON.stringify(status).slice(0, 500)}`);
-    if (status && String(status.result) === "0" && status.status !== "processing") {
+    if (status && String(status.result) === "0") {
       return status;
     }
     Utilities.sleep(intervalMs);
@@ -495,12 +534,26 @@ const pollInfomartOrderDeliveryUntilReady_ = (batchId, storeName) => {
   );
 };
 
-/** request → poll → get のオーケストレーション */
-const fetchInfomartOrderDeliveryTrades_ = (dateFrom, dateTo, targetDateSet, statusCodes, storeName) => {
-  let { batchId } = requestInfomartOrderDeliveryExtract_(dateFrom, dateTo, targetDateSet, statusCodes, storeName);
-  pollInfomartOrderDeliveryUntilReady_(batchId, storeName);
-  let result = getInfomartOrderDeliveryResult_(batchId, storeName);
-  return Array.isArray(result.trade_list) ? result.trade_list : (Array.isArray(result.list) ? result.list : []);
+/**
+ * request → poll(record_count取得) → get(seq_from/seq_toで連番指定・ページング) のオーケストレーション
+ * 未検証: 1回のget呼び出しで取得できる最大件数（他の受発注系API「取引不可日設定取得」の
+ * 記載に1000件上限とあったため、同じ上限を仮定してページングしている）
+ */
+const fetchInfomartOrderDeliveryTrades_ = (dateFrom, dateTo, targetDateSet, statusCodes, storeName, memberCodes) => {
+  let { batchId } = requestInfomartOrderDeliveryExtract_(dateFrom, dateTo, targetDateSet, statusCodes, storeName, memberCodes);
+  let status = pollInfomartOrderDeliveryUntilReady_(batchId, storeName);
+  let recordCount = Number(status.record_count) || 0;
+  if (recordCount === 0) return [];
+
+  let pageSize = 1000; // 仮定値（要検証。他の受発注系get APIの上限記載に準拠）
+  let trades = [];
+  for (let seqFrom = 1; seqFrom <= recordCount; seqFrom += pageSize) {
+    let seqTo = Math.min(seqFrom + pageSize - 1, recordCount);
+    let result = getInfomartOrderDeliveryResult_(batchId, seqFrom, seqTo, storeName);
+    let pageTrades = Array.isArray(result.trade) ? result.trade : [];
+    trades = trades.concat(pageTrades);
+  }
+  return trades;
 };
 
 /** Infomart受発注ログの見出しを用意（無ければ新規シート作成、ズレていれば書き直す） */
@@ -551,7 +604,10 @@ const writeInfomartOrderDeliveryLogForRange_ = (sheet, rangeKey, storeName, rows
 
 /** 指定範囲の受発注・納品データを取得してログシートへ書込み（フェーズ1のメイン導線） */
 const importInfomartOrderDeliveryForDateRange_ = (dateFrom, dateTo, storeName) => {
-  let targetDateSet = 0; // TODO: 実際に使う日付区分(0-7)を仕様確認後に見直す
+  // target_date_set: [0:更新日 1:伝票日 2:発注日 3:発送予定日 4:発送日 5:納品日 6:受領日 7:送信日]（ord_api_reference.htmlで確認済み）
+  // TODO: 「受発注・納品データ」として何を主軸に取り込みたいか（発注日ベースか納品日ベースか）は
+  // 運用側の意図次第のため、実データ確認後に業務要件に合わせて選び直すこと。現状は暫定で0のまま。
+  let targetDateSet = 0;
   let trades = fetchInfomartOrderDeliveryTrades_(dateFrom, dateTo, targetDateSet, null, storeName);
 
   let ss = SpreadsheetApp.getActiveSpreadsheet();
