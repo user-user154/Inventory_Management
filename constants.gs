@@ -9,7 +9,6 @@ const SHEET_NAMES = {
   RECIPE_MASTER: "レシピ表",
   BUDGET_ACTUAL: "予算・実績",
   VENDOR_MASTER: "発注業者マスタ",
-  MANUAL_LOG: "確定指示ログ",
   MANUAL_ADJUSTMENT_LOG: "AI予測手動調整ログ",
   POS_RAW: "POSデータ_生",
   POS_CLEAN: "POSデータ_整形後",
@@ -36,11 +35,12 @@ const SMAREGI_CONFIG = {
 
 /** インフォマート BtoBプラットフォームAPI 接続先（契約情報はシークレットではないためここに置く。
  *  全店舗共通のクライアントID/シークレットはスクリプトプロパティ INFOMART_CLIENT_ID /
- *  INFOMART_CLIENT_SECRET、認可コールバックURLは INFOMART_REDIRECT_URI、店舗ごとの
- *  リフレッシュトークンは INFOMART_REFRESH_TOKENS に店舗名→トークン文字列のJSONマップとして
- *  格納する（doGet()が認可完了時に自動保存。手動設定不要）。詳細はinfomart.gs参照。
- *  認証エンドポイントは /openam/oauth2/authorize・/openam/oauth2/access_token
- *  （旧実装で使っていた /api/credentials/access_token は正式なOAuth手順に存在しないため廃止）） */
+ *  INFOMART_CLIENT_SECRET。店舗ごとのPFID（ログインID・パスワード）は INFOMART_CREDENTIALS、
+ *  リフレッシュトークンは INFOMART_REFRESH_TOKENS に、それぞれ店舗名をキーにしたJSONマップ
+ *  として格納する（どちらもコードが自動で読み書きするため手動設定不要）。詳細はinfomart.gs参照。
+ *  初回取得・リフレッシュトークン失効時は POST /api/credentials/access_token
+ *  （リソースオーナー・パスワード・クレデンシャルズフロー）を使い、以後の再発行は
+ *  POST /openam/oauth2/access_token（grant_type=refresh_token）で行う。 */
 const INFOMART_CONFIG = {
   authBaseProd: "https://auth.infomart.co.jp",
   authBaseTest: "http://authtest.infomart.co.jp",
