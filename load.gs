@@ -2,6 +2,23 @@
  * 3. load.gs: データロード・コンテキスト構築関数群
  */
 
+/**
+ * 店舗をまたいで共通のマスタデータ（原材料・仕込みレシピ・レシピ・歩留まり・名寄せ・仕入先カレンダー）
+ * をまとめて1回だけロードする。これらはシミュレーション中に書き換えられない読み取り専用データなので、
+ * 夜間バッチ（runDailyPosImportAndPlanNextDay）で店舗ループの外側から1回だけ呼び、
+ * buildSimulationContext（runSimulationPipeline経由）へ使い回すことで、店舗数ぶんの重複読み込みを避ける。
+ */
+const loadSharedSimulationMasters_ = (ss) => {
+  ss = ss || SpreadsheetApp.getActiveSpreadsheet();
+  let nameUnifyMap = loadNameUnifyMaster(ss.getSheetByName(SHEET_NAMES.NAME_UNIFY_MASTER));
+  let rawMaster = loadRawMaterialMaster(ss.getSheetByName(SHEET_NAMES.RAW_MASTER));
+  let prepRecipes = loadPreparationRecipes(ss.getSheetByName(SHEET_NAMES.PREPARATION_RECIPE), nameUnifyMap);
+  let recipeMaster = loadRecipeMaster(ss.getSheetByName(SHEET_NAMES.RECIPE_MASTER), nameUnifyMap);
+  let yieldMap = loadYieldMaster(ss.getSheetByName(SHEET_NAMES.YIELD_MASTER), nameUnifyMap);
+  let vendorData = loadSTVendorCalendar(ss.getSheetByName(SHEET_NAMES.VENDOR_MASTER));
+  return { nameUnifyMap, rawMaster, prepRecipes, recipeMaster, yieldMap, vendorData };
+};
+
 const buildSimulationContext = (simStartDate, simDays, periodMode, orderDate, options) => {
   options = options || {};
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -26,10 +43,13 @@ const buildSimulationContext = (simStartDate, simDays, periodMode, orderDate, op
       : formatJstDate_(simStartDate);
   }
 
-  let nameUnifyMap = loadNameUnifyMaster(nameUnifySheet);
-  let rawMaster = loadRawMaterialMaster(rawSheet);
-  let prepRecipes = loadPreparationRecipes(prepSheet, nameUnifyMap);
-  let recipeMaster = loadRecipeMaster(recipeSheet, nameUnifyMap);
+  // 店舗間で共通のマスタ（読み取り専用）。runDailyPosImportAndPlanNextDay 等が
+  // loadSharedSimulationMasters_ で1回だけロードした結果を options 経由で渡した場合はそれを使い、
+  // 単発実行（メニュー・チェックボックス）など未指定の場合はここで都度ロードする。
+  let nameUnifyMap = options.nameUnifyMap || loadNameUnifyMaster(nameUnifySheet);
+  let rawMaster = options.rawMaster || loadRawMaterialMaster(rawSheet);
+  let prepRecipes = options.prepRecipes || loadPreparationRecipes(prepSheet, nameUnifyMap);
+  let recipeMaster = options.recipeMaster || loadRecipeMaster(recipeSheet, nameUnifyMap);
   let stockData = loadStockTakingData(stockSheet, nameUnifyMap, rawMaster, prepRecipes);
   logNameUnifyWarnings_(stockData, rawMaster, prepRecipes, nameUnifyMap);
   logRecipeIngredientWarnings_(recipeMaster, prepRecipes, rawMaster);
@@ -49,7 +69,7 @@ const buildSimulationContext = (simStartDate, simDays, periodMode, orderDate, op
   let budgetLoadDateKeys = targetDatesStr.concat([biasLookbackAnchorStr]);
   let budgetActualData = loadBudgetAndActualData(budgetSheet, budgetAnchor, budgetLoadDateKeys);
   let vendorData = options.vendorData || loadSTVendorCalendar(vendorSheet);
-  let yieldMap = loadYieldMaster(yieldSheet, nameUnifyMap);
+  let yieldMap = options.yieldMap || loadYieldMaster(yieldSheet, nameUnifyMap);
   logYieldMasterWarnings_(yieldMap, prepRecipes);
 
   logMissingBudgetDates(targetDatesStr, budgetActualData);

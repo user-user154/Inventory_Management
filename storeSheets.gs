@@ -225,10 +225,8 @@ const provisionStoreOperationSheets_ = (ss, store, allStores) => {
     setupOrderSheetActionControls_(storeSheets.orderSheet);
     setupOrderSheetManualInputArea(storeSheets.orderSheet);
     resetStuckOrderSheetCheckboxIfNeeded_(storeSheets.orderSheet);
-    clearLegacySheetTriggerCheckboxes_(storeSheets.orderSheet);
   }
   if (storeSheets.budgetSheet) {
-    clearLegacySheetTriggerCheckboxes_(storeSheets.budgetSheet);
     setupBudgetStartDateDropdown_(storeSheets.budgetSheet);
     applySmaregiStoreSelectionToSheet_(storeSheets.budgetSheet, store, allStores || [store]);
   }
