@@ -580,9 +580,12 @@ const STOCK_TAKING_DATA_START_ROW = 3;
 
 /**
  * 棚卸し表の列定義を解決
- * - 見出し行があれば 原材料名/在庫数/単位 を使用
- * - なければ A=名称, B=在庫数, C=単位（3行目〜）
+ * - 見出し行があれば 原材料名/在庫数/単位 を使用（換算値/換算単位の見出しがあればそれも拾う）
+ * - なければ A=名称, B=在庫数, C=単位, D=換算値, E=換算単位（3行目〜）
  * - C列の単位は商品ロット単位または発注単位での記述を想定
+ * - D/E列（換算値・換算単位）: 「tp」など商品ごとに実量が違い単位として成立しない棚卸し単位向け。
+ *   両方入力されていれば「在庫数(C列) × 換算値(D列)」を「換算単位(E列)」の数量として扱う
+ *   （例: C列「1」「tp」+ D列「150」+ E列「g」→ 150gとして計算）。D/E未入力の行は従来どおりC列の単位のみで判定。
  */
 const resolveStockTakingMeta_ = (sheet) => {
   if (!sheet) return null;
@@ -590,23 +593,29 @@ const resolveStockTakingMeta_ = (sheet) => {
   let meta = findHeaderRowAndIndices(sheet, ["原材料名", "在庫数", "単位"]);
   if (meta) {
     let minDataRowIdx = STOCK_TAKING_DATA_START_ROW - 1;
+    let idxConvFactor = meta.headers.indexOf("換算値");
+    let idxConvUnit = meta.headers.indexOf("換算単位");
     return {
       fullData: meta.fullData,
       dataStartRow: Math.max(meta.dataStartRow, minDataRowIdx),
       idxName: meta.headers.indexOf("原材料名"),
       idxQty: meta.headers.indexOf("在庫数"),
-      idxUnit: meta.headers.indexOf("単位")
+      idxUnit: meta.headers.indexOf("単位"),
+      idxConvFactor: idxConvFactor !== -1 ? idxConvFactor : null,
+      idxConvUnit: idxConvUnit !== -1 ? idxConvUnit : null
     };
   }
 
   let lastRow = sheet.getLastRow();
   if (lastRow < STOCK_TAKING_DATA_START_ROW) return null;
   return {
-    fullData: sheet.getRange(1, 1, lastRow, 3).getValues(),
+    fullData: sheet.getRange(1, 1, lastRow, 5).getValues(),
     dataStartRow: STOCK_TAKING_DATA_START_ROW - 1,
     idxName: 0,
     idxQty: 1,
-    idxUnit: 2
+    idxUnit: 2,
+    idxConvFactor: 3,
+    idxConvUnit: 4
   };
 };
 
@@ -645,6 +654,15 @@ const loadStockTakingData = (sheet, unifyMap, rawMaster, prepRecipes) => {
     let qty = Number(row[stockMeta.idxQty]);
     let unit = String(row[stockMeta.idxUnit]).trim();
     if (!rawName || isNaN(qty)) continue;
+
+    if (stockMeta.idxConvFactor != null && stockMeta.idxConvUnit != null) {
+      let convFactor = Number(row[stockMeta.idxConvFactor]);
+      let convUnit = String(row[stockMeta.idxConvUnit]).trim();
+      if (!isNaN(convFactor) && convFactor > 0 && convUnit) {
+        qty = qty * convFactor;
+        unit = convUnit;
+      }
+    }
 
     let name = resolveCanonicalName_(rawName, unifyMap);
     let kind = classifyUnifiedName_(name, rawMaster, prepRecipes);
