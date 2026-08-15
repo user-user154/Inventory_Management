@@ -503,7 +503,11 @@ const checkInfomartOrderDeliveryBatch_ = (batchId, storeName) => {
  */
 const getInfomartOrderDeliveryResult_ = (batchId, seqFrom, seqTo, storeName) => {
   let url = `${INFOMART_CONFIG.apiBase}/ordApi/order/trade/download/get`;
-  return infomartApiPost_(url, { batch_id: batchId, seq_from: String(seqFrom), seq_to: String(seqTo) }, storeName);
+  return infomartApiPost_(
+    url,
+    { response_type: "json", batch_id: batchId, seq_from: String(seqFrom), seq_to: String(seqTo) },
+    storeName
+  );
 };
 
 /**
