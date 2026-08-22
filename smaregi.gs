@@ -350,7 +350,7 @@ const importSmaregiDailyActuals_ = (dateStr, store, budgetSheetOverride) => {
 
   let totalAmount = convertPosSalesToExTax(totalIncTax);
   let budgetSheet = budgetSheetOverride || resolveStoreSheetsFromActiveSheet_(ss).budgetSheet;
-  let budgetWritten = budgetSheet ? writeBudgetRatioAtDate_(budgetSheet, dateStr, "実績", totalAmount) : false;
+  let budgetWritten = budgetSheet ? writeBudgetRatioAtDate_(budgetSheet, dateStr, "実績", totalAmount, "#,##0") : false;
 
   notifyUser(
     `スマレジ実績取込完了 [${dateStr} / ${store.storeName || store.storeId}]: ${aggregated.length}商品 / 合計${Math.round(totalAmount).toLocaleString()}円`
