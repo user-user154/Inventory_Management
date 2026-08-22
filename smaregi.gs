@@ -419,6 +419,75 @@ const runDailyPosImportAndPlanNextDay = () => {
   );
 };
 
+/**
+ * 毎朝5:00ごろの時間トリガー本体: 前日分のスマレジ実績を全店舗で取り直し、
+ * 「予算・実績」実績列の現在値とズレていれば上書きする（答え合わせ）。
+ * POS側の後編集・取消の反映タイミングのズレなどで、23:25の夜間取込み時点では
+ * まだ確定していなかった実績が、翌朝までに変わっていることがあるための保険。
+ * importSmaregiDailyActuals_ 自体は常に上書きするため、ここでは実行前の値を控えておき、
+ * 実行後の値と比較して「実際にズレていた店舗」だけをまとめの通知に出す。
+ */
+const runYesterdayPosVerifyAndFix = () => {
+  let ss = SpreadsheetApp.getActiveSpreadsheet();
+  let stores = getSmaregiStores_();
+  if (!stores || stores.length === 0) {
+    notifyUser("スマレジに店舗が1件も見つかりませんでした。", "前日実績の答え合わせ");
+    return;
+  }
+
+  let yesterday = addDaysToDateStr_(formatJstDate_(new Date()), -1);
+  let corrected = [];
+  let failed = [];
+
+  stores.forEach((store) => {
+    let storeName = String(store.storeName || "").trim();
+    try {
+      if (!storeName) throw new Error(`storeId=${store.storeId} は店舗名が空です`);
+      let storeSheets = resolveStoreSheetsByStoreName_(ss, storeName);
+      if (!storeSheets.budgetSheet) {
+        throw new Error("店舗別シート未作成です（「発注管理」→「店舗別シートを作成・整備」を先に実行してください）");
+      }
+
+      let before = readBudgetActualAtDate_(storeSheets.budgetSheet, yesterday);
+      let result = importSmaregiDailyActuals_(yesterday, store, storeSheets.budgetSheet);
+
+      if (before == null || Math.abs(before - result.totalAmount) >= 1) {
+        let beforeLabel = before == null ? "(空欄)" : `${Math.round(before).toLocaleString()}円`;
+        corrected.push(`${storeName}: ${beforeLabel} → ${Math.round(result.totalAmount).toLocaleString()}円`);
+      }
+    } catch (err) {
+      failed.push(`${storeName || store.storeId}: ${err.message}`);
+      Logger.log(`[前日実績の答え合わせ] 店舗「${storeName || store.storeId}」失敗: ${err.message}`);
+    }
+  });
+
+  notifyUser(
+    `前日(${yesterday})実績の答え合わせ完了: `
+    + (corrected.length > 0 ? `ズレを修正${corrected.length}店舗（${corrected.join(" / ")}）` : "全店舗ズレなし")
+    + (failed.length > 0 ? ` / 失敗${failed.length}店舗（${failed.join(" / ")}）` : ""),
+    "前日実績の答え合わせ"
+  );
+};
+
+const SMAREGI_VERIFY_TRIGGER_HANDLER_ = "runYesterdayPosVerifyAndFix";
+
+/** 前日実績の答え合わせトリガーを設定（毎朝5:00ごろ。旧トリガーや重複があれば削除してから作り直す） */
+const setupSmaregiVerifyTrigger = () => {
+  let removed = 0;
+  ScriptApp.getProjectTriggers().forEach((t) => {
+    if (t.getHandlerFunction() === SMAREGI_VERIFY_TRIGGER_HANDLER_) {
+      ScriptApp.deleteTrigger(t);
+      removed++;
+    }
+  });
+
+  ScriptApp.newTrigger(SMAREGI_VERIFY_TRIGGER_HANDLER_).timeBased().everyDays(1).atHour(5).nearMinute(0).create();
+  notifyUser(
+    "前日実績の答え合わせトリガーを設定しました（毎朝5:00ごろ、前日分のスマレジ実績を再取得しズレがあれば上書き）。"
+    + (removed > 0 ? `既存トリガー${removed}件を置き換えました。` : "")
+  );
+};
+
 /** 日付を指定して手動再取得（空欄なら本日、対象店舗は開いているタブの予算・実績 D1 の選択に従う） */
 const promptAndImportSmaregiActuals = () => {
   let ss = SpreadsheetApp.getActiveSpreadsheet();

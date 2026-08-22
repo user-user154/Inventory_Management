@@ -20,6 +20,8 @@ function onOpen() {
     .addItem("日次原価率だけ再計算（期間を1日ずつ・バックログ/指示書は変更しません）", "promptAndRecalculateDailyCostRatioRange")
     .addItem("実績取得→翌日の仕込み・発注計算を今すぐ実行（全店舗）", "runDailyPosImportAndPlanNextDay")
     .addItem("スマレジ日次自動取得トリガーを設定（全店舗を毎晩自動処理）", "setupSmaregiDailyTrigger")
+    .addItem("前日実績の答え合わせを今すぐ実行（全店舗・ズレていれば上書き）", "runYesterdayPosVerifyAndFix")
+    .addItem("前日実績の答え合わせトリガーを設定（全店舗を毎朝5:00ごろ自動処理）", "setupSmaregiVerifyTrigger")
     .addSeparator()
     .addItem("InfomartのPFIDを登録（対象店舗のタブを開いてから実行）", "promptInfomartCredentialRegistration")
     .addItem("Infomart請求書を取得（当日分・対象店舗のタブを開いてから実行）", "runInfomartInvoiceImportToday")
