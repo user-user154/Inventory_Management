@@ -529,9 +529,9 @@ const setupSmaregiDailyTrigger = () => {
     }
   });
 
-  ScriptApp.newTrigger(SMAREGI_DAILY_TRIGGER_HANDLER_).timeBased().everyDays(1).atHour(23).nearMinute(10).create();
+  ScriptApp.newTrigger(SMAREGI_DAILY_TRIGGER_HANDLER_).timeBased().everyDays(1).atHour(23).nearMinute(25).create();
   notifyUser(
-    "スマレジ日次自動取得トリガーを設定しました（毎日23:10ごろ、当日分の実績取得→翌日の仕込み・発注計算まで自動実行）。"
+    "スマレジ日次自動取得トリガーを設定しました（毎日23:25ごろ、当日分の実績取得→翌日の仕込み・発注計算まで自動実行）。"
     + (removed > 0 ? `既存トリガー${removed}件を置き換えました。` : "")
   );
 };
