@@ -592,27 +592,37 @@ const getInfomartOrderDeliveryResult_ = (batchId, seqFrom, seqTo, storeName) => 
 };
 
 /**
- * ジョブの完了を同一関数内で短時間ポーリングする（GAS実行時間上限[約6分]に対し十分余裕を持たせる）
+ * Infomartの非同期ダウンロード系API（受発注・マスタ共通）のジョブ完了をポーリングする
+ * （GAS実行時間上限[約6分]に対し十分余裕を持たせる）。
  *
- * 「準備完了」判定は batch_flg>=3 で行う（result==="0"はcheck API呼び出し自体の成功可否でしかなく、
- * ジョブの完了状態ではないため判定に使わない）。2026-08-25の実機検証で以下の遷移を確認済み:
- *   batch_flg=1（処理中・record_count=0） → batch_flg=2（処理中・record_count=0）
- *   → batch_flg=3（完了・record_countに実件数が入る、確認時は約25秒後）
- * 旧実装は result==="0" を「準備完了」として初回checkで即座に抜けていたため、実際にはジョブが
- * batch_flg=1〜2の処理中段階なのにrecord_count=0を「対象データなし」と誤認していた
+ * batch_flgの意味は2026-08-25にマスタダウンロードAPIのリファレンスで正式に確認済み:
+ *   1=処理待ち 2=処理中 3=処理終了(成功) 4=処理中止 5=エラー終了
+ *   0=入力情報が不正、または結果データなし
+ * 受発注ダウンロードAPIは同じ非同期基盤を使っており、実機検証で同じ遷移
+ * （1→2→3でrecord_countが埋まる、確認時は約10〜60秒後）を確認済みのため同じ判定を適用する。
+ * 旧実装は result==="0"（check API呼び出し自体の成功可否でしかない）を「準備完了」としていたため、
+ * 実際にはジョブがbatch_flg=1〜2の処理中段階なのにrecord_count=0を「対象データなし」と誤認していた
  * （親アカウントの取引一覧では存在が確認できる伝票が0件と表示され続けたバグの原因）。
+ * さらにその後の`>=3`判定は4(処理中止)・5(エラー終了)も「完了」と誤判定する抜けがあったため、
+ * 3と0のみ成功、4と5は明示的にエラーとして扱うよう修正した。
+ * @param {() => object} checkFn checkInfomartOrderDeliveryBatch_ 等、引数無しで呼べる形にした関数
  */
-const pollInfomartOrderDeliveryUntilReady_ = (batchId, storeName) => {
+const pollInfomartBatchUntilReady_ = (checkFn, storeName, batchId, logLabel) => {
   let maxAttempts = 30;
   let intervalMs = 3000;
   let deadline = Date.now() + 100 * 1000;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (Date.now() > deadline) break;
-    let status = checkInfomartOrderDeliveryBatch_(batchId, storeName);
-    Logger.log(`[Infomart受発注] 店舗=${storeName} batch_id=${batchId} check#${attempt}: ${JSON.stringify(status).slice(0, 500)}`);
-    if (status && Number(status.batch_flg) >= 3) {
-      return status;
+    let status = checkFn();
+    Logger.log(`[${logLabel}] 店舗=${storeName} batch_id=${batchId} check#${attempt}: ${JSON.stringify(status).slice(0, 500)}`);
+    let flg = status ? Number(status.batch_flg) : NaN;
+    if (flg === 3 || flg === 0) return status;
+    if (flg === 4) {
+      throw new Error(`[${logLabel}] 店舗=${storeName} batch_id=${batchId} ジョブが処理中止されました（batch_flg=4）。`);
+    }
+    if (flg === 5) {
+      throw new Error(`[${logLabel}] 店舗=${storeName} batch_id=${batchId} ジョブがエラー終了しました（batch_flg=5）: ${JSON.stringify((status && status.error_list) || [])}`);
     }
     Utilities.sleep(intervalMs);
   }
@@ -620,8 +630,14 @@ const pollInfomartOrderDeliveryUntilReady_ = (batchId, storeName) => {
   let props = PropertiesService.getScriptProperties();
   props.setProperty(INFOMART_ORDER_LAST_BATCH_ID_PROP_PREFIX_ + storeName, batchId);
   throw new Error(
-    `Infomart受発注データの準備が時間内に完了しませんでした（店舗=${storeName} batch_id=${batchId}）。`
+    `[${logLabel}] 店舗=${storeName} batch_id=${batchId} 準備が時間内に完了しませんでした。`
     + "1分ほど待ってから再実行してください。"
+  );
+};
+
+const pollInfomartOrderDeliveryUntilReady_ = (batchId, storeName) => {
+  return pollInfomartBatchUntilReady_(
+    () => checkInfomartOrderDeliveryBatch_(batchId, storeName), storeName, batchId, "Infomart受発注"
   );
 };
 
@@ -645,6 +661,134 @@ const fetchInfomartOrderDeliveryTrades_ = (dateFrom, dateTo, targetDateSet, stat
     trades = trades.concat(pageTrades);
   }
   return trades;
+};
+
+// ---------------------------------------------------------------------------
+// マスタ（自社管理商品・カタログ）データ（読み取り、非同期ジョブ: request → check → get）
+// 2026-08-25、ユーザー提供のリファレンスで存在を確認して追加。受発注ダウンロードと違い日付範囲
+// 指定が必須ではなく、発注履歴の有無に関係なく取引先の全商品カタログを一括取得できる
+// （名寄せマスタ整備用の商品一覧としてこちらを使う）。
+// ---------------------------------------------------------------------------
+
+/** マスタダウンロードを依頼（非同期ジョブの開始）。paramsはリファレンス記載の各絞り込み項目 */
+const requestInfomartMasterDownload_ = (storeName, params) => {
+  let url = `${INFOMART_CONFIG.apiBase}/ordApi/order/master/download/buy/request`;
+  let json = infomartApiPost_(url, params || {}, storeName);
+  return { requestId: json.request_id, batchId: json.batch_id };
+};
+
+const checkInfomartMasterDownloadBatch_ = (batchId, storeName) => {
+  let url = `${INFOMART_CONFIG.apiBase}/ordApi/order/master/download/buy/check`;
+  return infomartApiPost_(url, { batch_id: batchId }, storeName);
+};
+
+const getInfomartMasterDownloadResult_ = (batchId, seqFrom, seqTo, storeName) => {
+  let url = `${INFOMART_CONFIG.apiBase}/ordApi/order/master/download/buy/get`;
+  return infomartApiPost_(url, { batch_id: batchId, seq_from: String(seqFrom), seq_to: String(seqTo) }, storeName);
+};
+
+/**
+ * request → poll → get(seq_from/seq_toで連番指定、5000件単位ページング) のオーケストレーション
+ * @param {object} [params] member_code_list未指定時は「本部のみ」扱い（リファレンス記載）。
+ *   店舗を絞り込みたい場合は params.member_code_list に自社会員システムコードを渡す。
+ */
+const fetchInfomartMasterCatalog_ = (storeName, params) => {
+  let { batchId } = requestInfomartMasterDownload_(storeName, params);
+  let status = pollInfomartBatchUntilReady_(
+    () => checkInfomartMasterDownloadBatch_(batchId, storeName), storeName, batchId, "Infomartマスタ"
+  );
+  let recordCount = Number(status.record_count) || 0;
+  if (recordCount === 0) return [];
+
+  let pageSize = 5000; // リファレンス記載の上限
+  let items = [];
+  for (let seqFrom = 1; seqFrom <= recordCount; seqFrom += pageSize) {
+    let seqTo = Math.min(seqFrom + pageSize - 1, recordCount);
+    let result = getInfomartMasterDownloadResult_(batchId, seqFrom, seqTo, storeName);
+    let pageItems = Array.isArray(result.master) ? result.master : [];
+    items = items.concat(pageItems);
+  }
+  return items;
+};
+
+const INFOMART_ITEM_MASTER_HEADERS_ = [
+  "取得日", "仕入先", "商品ID", "商品名", "規格", "単位", "単価",
+  "大分類", "中分類", "小分類", "自社管理コード", "表示状態コード", "販売中止状態コード"
+];
+
+/** Infomart商品マスタシートの見出しを用意（無ければ新規シート作成、ズレていれば書き直す） */
+const ensureInfomartItemMasterSheet_ = (ss) => {
+  let sheet = ss.getSheetByName(SHEET_NAMES.INFOMART_ITEM_MASTER);
+  if (!sheet) {
+    sheet = ss.insertSheet(SHEET_NAMES.INFOMART_ITEM_MASTER);
+    Logger.log(`[Infomart] シート「${SHEET_NAMES.INFOMART_ITEM_MASTER}」を新規作成`);
+  }
+  let currentHeaders = sheet.getRange(1, 1, 1, INFOMART_ITEM_MASTER_HEADERS_.length).getValues()[0]
+    .map((v) => { return String(v == null ? "" : v).trim(); });
+  let matches = INFOMART_ITEM_MASTER_HEADERS_.every((h, i) => { return currentHeaders[i] === h; });
+  if (!matches) {
+    sheet.getRange(1, 1, 1, INFOMART_ITEM_MASTER_HEADERS_.length).setValues([INFOMART_ITEM_MASTER_HEADERS_]);
+    Logger.log(`[Infomart] 「${SHEET_NAMES.INFOMART_ITEM_MASTER}」の見出し行を更新しました`);
+  }
+  return sheet;
+};
+
+/**
+ * 商品マスタを取得してシートへ全件洗い替えする（名寄せマスタ整備用。取得日ぶんの差分保持は
+ * 行わない＝毎回カタログ全体をスナップショットとして置き換える、他のInfomartログとは異なる運用）。
+ * catalog（カタログ情報）を主に使う。buyとcatalogでitem_idが食い違うケースが実データで確認できて
+ * おり原因未確認のため、名寄せ照合にはcatalog側のitem_idを使う（catalog側にのみ単価・カテゴリ・
+ * 表示/廃止状態が揃っているため）。
+ */
+const importInfomartItemMaster_ = (storeName, memberCodes) => {
+  let params = {};
+  if (memberCodes && memberCodes.length > 0) params.member_code_list = memberCodes;
+  let items = fetchInfomartMasterCatalog_(storeName, params);
+
+  let today = formatJstDate_(new Date());
+  let rows = items.map((i) => {
+    let c = i.catalog || {};
+    return [
+      today, i.member_name_partner || "", c.item_id || "", c.item_name || "", c.item_spec || "",
+      c.item_unit_name || c.prod_unit_name || "", c.prod_lot_price != null ? c.prod_lot_price : "",
+      c.food_cat_large_name || "", c.food_cat_middle_name || "", c.food_cat_small_name || "",
+      c.private_item_code || "", c.view_active_code != null ? c.view_active_code : "",
+      c.sell_stop_active_code != null ? c.sell_stop_active_code : ""
+    ];
+  });
+
+  let ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sheet = ensureInfomartItemMasterSheet_(ss);
+  let lastRow = sheet.getLastRow();
+  if (lastRow >= 2) {
+    sheet.getRange(2, 1, lastRow - 1, INFOMART_ITEM_MASTER_HEADERS_.length).clearContent();
+  }
+  if (rows.length > 0) {
+    sheet.getRange(2, 1, rows.length, INFOMART_ITEM_MASTER_HEADERS_.length).setValues(rows);
+  }
+
+  notifyUser(`Infomart商品マスタ取込完了 [${storeName}]: ${rows.length}件（シート「${SHEET_NAMES.INFOMART_ITEM_MASTER}」を全件洗い替え）`);
+  return { storeName: storeName, itemCount: rows.length };
+};
+
+/** 商品マスタを手動取得（メニューから実行。対象店舗は予算・実績 D1 の選択に従う） */
+const promptAndImportInfomartItemMaster = () => {
+  let ss = SpreadsheetApp.getActiveSpreadsheet();
+  let budgetSheet = resolveStoreSheetsFromActiveSheet_(ss).budgetSheet;
+  let storeName = resolveSelectedInfomartStoreName_(budgetSheet);
+  let memberCode = getInfomartCredentialForStore_(storeName).memberCode;
+
+  let ui = SpreadsheetApp.getUi();
+  let res = ui.alert(
+    "Infomart商品マスタを取得",
+    `対象店舗: ${storeName}\nこのPFIDで見える商品カタログ全件を取得します`
+    + `（${memberCode ? `会員コード${memberCode}を指定` : "会員コード未設定のため「本部のみ」扱い"}）。`
+    + "件数が多いと数分かかります。よろしいですか？",
+    ui.ButtonSet.YES_NO
+  );
+  if (res !== ui.Button.YES) return;
+
+  importInfomartItemMaster_(storeName, memberCode ? [memberCode] : null);
 };
 
 /** Infomart受発注ログの見出しを用意（無ければ新規シート作成、ズレていれば書き直す） */
