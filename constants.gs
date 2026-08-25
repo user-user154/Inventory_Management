@@ -19,7 +19,8 @@ const SHEET_NAMES = {
   YIELD_MASTER: "歩留まりマスタ",
   ACTUAL_SALES_LOG: "実績出数ログ",
   INFOMART_INVOICE_LOG: "Infomart請求書ログ",
-  INFOMART_ORDER_DELIVERY_LOG: "Infomart受発注ログ"
+  INFOMART_ORDER_DELIVERY_LOG: "Infomart受発注ログ",
+  INFOMART_ITEM_MASTER: "Infomart商品マスタ"
 };
 
 const SALES_TAX_RATE = 0.10;

@@ -26,6 +26,7 @@ function onOpen() {
     .addItem("Infomart請求書を取得（当日分・対象店舗のタブを開いてから実行）", "runInfomartInvoiceImportToday")
     .addItem("Infomart請求書を取得（日付指定・対象店舗のタブを開いてから実行）", "promptAndImportInfomartInvoices")
     .addItem("Infomart受発注データを取得（日付範囲指定・対象店舗のタブを開いてから実行）", "promptAndImportInfomartOrderDelivery")
+    .addItem("Infomart商品マスタを取得（名寄せ用・対象店舗のタブを開いてから実行）", "promptAndImportInfomartItemMaster")
     .addItem("発注バックログをInfomartから取得（日付指定・対象店舗のタブを開いてから実行）", "promptAndImportInfomartOrderBacklog")
     .addItem("発注バックログ取得元を切替（Infomart⇔手動確定コミット・ロールバック用）", "toggleInfomartOrderBacklogSource")
     .addItem("onEdit連携トリガーを設定（長時間実行用・任意）", "setupOnEditInstallableTrigger")

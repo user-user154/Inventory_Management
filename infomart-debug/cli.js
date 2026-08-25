@@ -41,6 +41,16 @@ Infomart API 検証CLI
       … diagnoseInfomartOrderDelivery_ 相当。request→check→get を1回通しで実行する。
   node cli.js order-scope <store> [lookbackDays=13] [targetDateSet=2] [memberCodesCsv]
       … diagnoseInfomartOrderStoreScope_ 相当。取引先名の内訳を確認する。
+  node cli.js item-catalog <store> [daysBack=90] [memberCodesCsv] [outPath]
+      … 過去daysBack日ぶんの発注データ(14日区切りで自動分割)から登場した商品をitem_id単位で
+        集計し、CSV(item-catalog-<store>.csv 既定)に書き出す。発注履歴ベースの簡易版
+        （master-catalogの方が全件・高速なので基本はそちらを推奨）。
+  node cli.js master-catalog <store> [memberCodesCsv] [outPath]
+      … マスタダウンロードAPI(/ordApi/order/master/download/buy/*)で自社管理商品カタログを
+        一括取得しCSV(master-catalog-<store>.csv 既定)に書き出す。発注履歴と無関係に全商品を
+        取得できるため名寄せマスタ整備の本命。memberCodesCsv省略時は「本部のみ」扱い。
+  node cli.js master-raw <store> [memberCodesCsv] [outPath]
+      … 上記の生JSON版（フィールド確認用）。
   node cli.js scan-date-sets <store> [lookbackDays=13 | dateFrom dateTo] [memberCodesCsv]
       … diagnoseInfomartOrderRecordCountsByDateType_ 相当。target_date_set 0〜7を総当たり。
         memberCodesCsvは「自社会員システムコード」(半角8桁、店舗ごとに割当。Infomart側の
@@ -226,6 +236,137 @@ const cmdOrder = async () => {
   printJson("[診断Infomart] get結果", result);
 };
 
+/**
+ * 過去daysBack日ぶんの発注データ(target_date_set=2)を14日単位のウィンドウに分割して取得し、
+ * 登場した商品(item_id単位)を集計してCSVに書き出す。Infomartには商品マスタ単体を取得するAPIが
+ * 無いため、実際に発注した商品の一覧化＝名寄せマスタ整備の元ネタとしてこれを使う。
+ */
+const cmdItemCatalog = async () => {
+  let store = requireArg(args[1], "store");
+  let daysBack = Number(args[2] || 90);
+  let memberCodes = args[3] ? args[3].split(",").map((s) => s.trim()).filter(Boolean) : null;
+  let outPath = args[4] || `item-catalog-${store}.csv`;
+
+  let dateTo = core.formatJstDate_(new Date());
+  let windowStart = new Date();
+  windowStart.setDate(windowStart.getDate() - daysBack);
+  let overallFrom = core.formatJstDate_(windowStart);
+
+  let windows = [];
+  let cursor = new Date(overallFrom + "T12:00:00");
+  let endDate = new Date(dateTo + "T12:00:00");
+  while (cursor <= endDate) {
+    let winFrom = core.formatJstDate_(cursor);
+    let winToDate = new Date(cursor);
+    winToDate.setDate(winToDate.getDate() + 13);
+    if (winToDate > endDate) winToDate = endDate;
+    windows.push({ from: winFrom, to: core.formatJstDate_(winToDate) });
+    cursor = new Date(winToDate);
+    cursor.setDate(cursor.getDate() + 1);
+  }
+
+  Logger.log(`[商品一覧] 店舗=${store} 期間=${overallFrom}〜${dateTo}（${windows.length}ウィンドウ、各最大14日）`);
+
+  let itemsById = {};
+  let totalTrades = 0;
+  for (let i = 0; i < windows.length; i++) {
+    let w = windows[i];
+    Logger.log(`[商品一覧] ウィンドウ${i + 1}/${windows.length}: ${w.from}〜${w.to} を取得中...`);
+    let trades;
+    try {
+      trades = await core.fetchInfomartOrderDeliveryTrades_(w.from, w.to, 2, null, store, memberCodes);
+    } catch (err) {
+      Logger.log(`[商品一覧] ウィンドウ${w.from}〜${w.to} 失敗（スキップ）: ${err.message}`);
+      continue;
+    }
+    totalTrades += trades.length;
+    trades.forEach((t) => {
+      let vendor = t.member_name_partner || "";
+      (t.detail_list || []).forEach((d) => {
+        let key = d.item_id || d.item_name;
+        if (!key) return;
+        if (!itemsById[key]) {
+          itemsById[key] = {
+            item_id: d.item_id || "", item_name: d.item_name || "", item_spec: d.item_spec || "",
+            unit: d.item_unit_name || "", my_catalog_id: d.my_catalog_id || "", small_code: d.small_code || "",
+            vendor: vendor, lastPrice: d.prod_lot_price || "", orderCount: 0
+          };
+        }
+        itemsById[key].orderCount += 1;
+        itemsById[key].lastPrice = d.prod_lot_price || itemsById[key].lastPrice;
+      });
+    });
+  }
+
+  let rows = Object.values(itemsById).sort((a, b) => { return b.orderCount - a.orderCount; });
+  let csvEscape = (v) => { return `"${String(v == null ? "" : v).replace(/"/g, '""')}"`; };
+  let header = ["item_id", "item_name", "item_spec", "unit", "my_catalog_id", "small_code", "vendor", "lastPrice", "orderCount"];
+  let lines = [header.join(",")];
+  rows.forEach((r) => {
+    lines.push(header.map((h) => { return csvEscape(r[h]); }).join(","));
+  });
+  fs.writeFileSync(outPath, "﻿" + lines.join("\n"), "utf8"); // BOM付きでExcel/スプレッドシートでの文字化けを防ぐ
+
+  Logger.log(`[商品一覧] 完了: 伝票${totalTrades}件 / ユニーク商品${rows.length}件 → ${outPath} に書き出しました`);
+};
+
+/**
+ * マスタダウンロードAPI(/ordApi/order/master/download/buy/*)で自社管理商品カタログを取得し、
+ * 生JSONをファイルに書き出す（buy[]/catalog[]の実フィールド名がリファレンスに無いため、
+ * まずこれで実データを見て確認する）。
+ */
+const cmdMasterRaw = async () => {
+  let store = requireArg(args[1], "store");
+  let memberCodes = args[2] ? args[2].split(",").map((s) => s.trim()).filter(Boolean) : null;
+  let outPath = args[3] || `master-raw-${store}.json`;
+
+  let params = {};
+  if (memberCodes && memberCodes.length > 0) {
+    params.member_code_list = memberCodes;
+  }
+  let items = await core.fetchInfomartMasterCatalog_(store, params);
+  Logger.log(`[マスタ生データ] 店舗=${store} 件数=${items.length}`);
+  fs.writeFileSync(outPath, JSON.stringify(items, null, 1), "utf8");
+  Logger.log(`[マスタ生データ] ${outPath} に書き出しました（先頭2件のみ表示）`);
+  console.log(JSON.stringify(items.slice(0, 2), null, 1));
+};
+
+/**
+ * マスタダウンロードAPIで取得した自社管理商品カタログを、名寄せ作業用の見やすいCSVに整形する。
+ * catalog側のフィールド（単価・カテゴリ・有効状態まで揃っている）を主に使う。
+ */
+const cmdMasterCatalog = async () => {
+  let store = requireArg(args[1], "store");
+  let memberCodes = args[2] ? args[2].split(",").map((s) => s.trim()).filter(Boolean) : null;
+  let outPath = args[3] || `master-catalog-${store}.csv`;
+
+  let params = {};
+  if (memberCodes && memberCodes.length > 0) params.member_code_list = memberCodes;
+  let items = await core.fetchInfomartMasterCatalog_(store, params);
+  Logger.log(`[マスタ商品一覧] 店舗=${store} 件数=${items.length}`);
+
+  let csvEscape = (v) => { return `"${String(v == null ? "" : v).replace(/"/g, '""')}"`; };
+  let header = [
+    "item_id", "item_name", "item_spec", "unit", "price", "vendor",
+    "food_cat_large_name", "food_cat_middle_name", "food_cat_small_name",
+    "private_item_code", "view_active_code", "sell_stop_active_code"
+  ];
+  let lines = [header.join(",")];
+  items.forEach((i) => {
+    let c = i.catalog || {};
+    let row = {
+      item_id: c.item_id, item_name: c.item_name, item_spec: c.item_spec,
+      unit: c.item_unit_name || c.prod_unit_name, price: c.prod_lot_price, vendor: i.member_name_partner,
+      food_cat_large_name: c.food_cat_large_name, food_cat_middle_name: c.food_cat_middle_name,
+      food_cat_small_name: c.food_cat_small_name, private_item_code: c.private_item_code,
+      view_active_code: c.view_active_code, sell_stop_active_code: c.sell_stop_active_code
+    };
+    lines.push(header.map((h) => { return csvEscape(row[h]); }).join(","));
+  });
+  fs.writeFileSync(outPath, "﻿" + lines.join("\n"), "utf8");
+  Logger.log(`[マスタ商品一覧] ${outPath} に書き出しました`);
+};
+
 const cmdOrderScope = async () => {
   let store = requireArg(args[1], "store");
   let lookbackDays = Number(args[2] || 13);
@@ -347,6 +488,9 @@ const COMMANDS = {
   "invoices-scope": cmdInvoicesScope,
   "order": cmdOrder,
   "order-scope": cmdOrderScope,
+  "item-catalog": cmdItemCatalog,
+  "master-raw": cmdMasterRaw,
+  "master-catalog": cmdMasterCatalog,
   "scan-date-sets": cmdScanDateSets,
   "scan-status-sets": cmdScanStatusSets,
   "scan-day-before-yesterday": cmdScanDayBeforeYesterday,

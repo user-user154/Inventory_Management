@@ -240,26 +240,44 @@ const getInfomartOrderDeliveryResult_ = async (batchId, seqFrom, seqTo, storeNam
   return infomartApiPost_(url, { batch_id: batchId, seq_from: String(seqFrom), seq_to: String(seqTo) }, storeName);
 };
 
-const pollInfomartOrderDeliveryUntilReady_ = async (batchId, storeName) => {
-  // 準備完了はbatch_flg>=3で判定（result==="0"はcheck API呼び出し自体の成否でしかなく、
-  // ジョブ完了とは無関係。infomart.gs側の同名関数のコメント参照）
+/**
+ * Infomartの非同期ダウンロード系API（受発注・マスタ共通）のジョブ完了をポーリングする。
+ * batch_flgの意味は2026-08-25にマスタダウンロードAPIのリファレンスで正式に確認済み:
+ *   1=処理待ち 2=処理中 3=処理終了(成功) 4=処理中止 5=エラー終了
+ *   0=入力情報が不正、または結果データなし
+ * 受発注ダウンロードAPIは同じ非同期基盤を使っており、実機検証で同じ遷移(1→2→3で
+ * record_countが埋まる)を確認済みのため同じ判定を適用する。
+ * @param {() => Promise<object>} checkFn checkInfomartOrderDeliveryBatch_ 等、引数無しで呼べる形にした関数
+ */
+const pollInfomartBatchUntilReady_ = async (checkFn, storeName, batchId, logLabel) => {
   let maxAttempts = 30;
   let intervalMs = 3000;
   let deadline = Date.now() + 100 * 1000;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     if (Date.now() > deadline) break;
-    let status = await checkInfomartOrderDeliveryBatch_(batchId, storeName);
-    Logger.log(`[Infomart受発注] 店舗=${storeName} batch_id=${batchId} check#${attempt}: ${JSON.stringify(status).slice(0, 500)}`);
-    if (status && Number(status.batch_flg) >= 3) {
-      return status;
+    let status = await checkFn();
+    Logger.log(`[${logLabel}] 店舗=${storeName} batch_id=${batchId} check#${attempt}: ${JSON.stringify(status).slice(0, 500)}`);
+    let flg = status ? Number(status.batch_flg) : NaN;
+    if (flg === 3 || flg === 0) return status;
+    if (flg === 4) {
+      throw new Error(`[${logLabel}] 店舗=${storeName} batch_id=${batchId} ジョブが処理中止されました（batch_flg=4）。`);
+    }
+    if (flg === 5) {
+      throw new Error(`[${logLabel}] 店舗=${storeName} batch_id=${batchId} ジョブがエラー終了しました（batch_flg=5）: ${JSON.stringify((status && status.error_list) || [])}`);
     }
     await Utilities.sleep(intervalMs);
   }
 
   throw new Error(
-    `Infomart受発注データの準備が時間内に完了しませんでした（店舗=${storeName} batch_id=${batchId}）。`
+    `[${logLabel}] 店舗=${storeName} batch_id=${batchId} 準備が時間内に完了しませんでした。`
     + "1分ほど待ってから再実行してください。"
+  );
+};
+
+const pollInfomartOrderDeliveryUntilReady_ = async (batchId, storeName) => {
+  return pollInfomartBatchUntilReady_(
+    () => checkInfomartOrderDeliveryBatch_(batchId, storeName), storeName, batchId, "Infomart受発注"
   );
 };
 
@@ -280,6 +298,50 @@ const fetchInfomartOrderDeliveryTrades_ = async (dateFrom, dateTo, targetDateSet
   return trades;
 };
 
+// ---------------------------------------------------------------------------
+// マスタ（自社管理商品・カタログ）データ（読み取り、非同期ジョブ: request → check → get）
+// 2026-08-25、ユーザー提供のリファレンスで存在を確認して追加。受発注ダウンロードと違い日付範囲
+// 指定が必須ではなく、発注履歴の有無に関係なく取引先の全商品カタログを一括取得できる。
+// ---------------------------------------------------------------------------
+const requestInfomartMasterDownload_ = async (storeName, params) => {
+  let url = `${INFOMART_CONFIG.apiBase}/ordApi/order/master/download/buy/request`;
+  let json = await infomartApiPost_(url, params || {}, storeName);
+  return { requestId: json.request_id, batchId: json.batch_id };
+};
+
+const checkInfomartMasterDownloadBatch_ = async (batchId, storeName) => {
+  let url = `${INFOMART_CONFIG.apiBase}/ordApi/order/master/download/buy/check`;
+  return infomartApiPost_(url, { batch_id: batchId }, storeName);
+};
+
+const getInfomartMasterDownloadResult_ = async (batchId, seqFrom, seqTo, storeName) => {
+  let url = `${INFOMART_CONFIG.apiBase}/ordApi/order/master/download/buy/get`;
+  return infomartApiPost_(url, { batch_id: batchId, seq_from: String(seqFrom), seq_to: String(seqTo) }, storeName);
+};
+
+/**
+ * @param {object} [params] request body（member_code_list等）。未指定項目はInfomart側の既定値
+ *   （多くは「本部のみ」または「全て」）が使われる。詳細はrequestInfomartMasterDownload_の呼び出し元参照。
+ */
+const fetchInfomartMasterCatalog_ = async (storeName, params) => {
+  let { batchId } = await requestInfomartMasterDownload_(storeName, params);
+  let status = await pollInfomartBatchUntilReady_(
+    () => checkInfomartMasterDownloadBatch_(batchId, storeName), storeName, batchId, "Infomartマスタ"
+  );
+  let recordCount = Number(status.record_count) || 0;
+  if (recordCount === 0) return [];
+
+  let pageSize = 5000; // リファレンス記載の上限
+  let items = [];
+  for (let seqFrom = 1; seqFrom <= recordCount; seqFrom += pageSize) {
+    let seqTo = Math.min(seqFrom + pageSize - 1, recordCount);
+    let result = await getInfomartMasterDownloadResult_(batchId, seqFrom, seqTo, storeName);
+    let pageItems = Array.isArray(result.master) ? result.master : [];
+    items = items.concat(pageItems);
+  }
+  return items;
+};
+
 module.exports = {
   formatJstDate_,
   getInfomartClientCredentials_,
@@ -297,6 +359,11 @@ module.exports = {
   requestInfomartOrderDeliveryExtract_,
   checkInfomartOrderDeliveryBatch_,
   getInfomartOrderDeliveryResult_,
+  pollInfomartBatchUntilReady_,
   pollInfomartOrderDeliveryUntilReady_,
-  fetchInfomartOrderDeliveryTrades_
+  fetchInfomartOrderDeliveryTrades_,
+  requestInfomartMasterDownload_,
+  checkInfomartMasterDownloadBatch_,
+  getInfomartMasterDownloadResult_,
+  fetchInfomartMasterCatalog_
 };
