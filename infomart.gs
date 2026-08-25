@@ -480,6 +480,7 @@ const promptAndImportInfomartInvoices = () => {
 const requestInfomartOrderDeliveryExtract_ = (dateFrom, dateTo, targetDateSet, statusCodes, storeName, memberCodes, statusSet) => {
   let url = `${INFOMART_CONFIG.apiBase}/ordApi/order/trade/download/request`;
   let body = {
+    response_type: "json",
     target_date_set: targetDateSet,
     target_date_from: dateFrom,
     target_date_to: dateTo
@@ -494,7 +495,7 @@ const requestInfomartOrderDeliveryExtract_ = (dateFrom, dateTo, targetDateSet, s
 /** ジョブの状態を1回確認する（成功時のレスポンスは request_id/result/error_list/batch_flg/record_count） */
 const checkInfomartOrderDeliveryBatch_ = (batchId, storeName) => {
   let url = `${INFOMART_CONFIG.apiBase}/ordApi/order/trade/download/check`;
-  return infomartApiPost_(url, { batch_id: batchId }, storeName);
+  return infomartApiPost_(url, { response_type: "json", batch_id: batchId }, storeName);
 };
 
 /**
