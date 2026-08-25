@@ -7,6 +7,9 @@ test.js
 # Cursor / editor
 .cursor/
 
+# Claude Code ローカル設定・ワークツリー（個人環境依存、リポジトリに含めない）
+.claude/
+
 # ローカル専用（リポジトリに含めない）
 setup-git.sh
 *.pages

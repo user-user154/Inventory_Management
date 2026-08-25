@@ -19,6 +19,125 @@ const loadSharedSimulationMasters_ = (ss) => {
   return { nameUnifyMap, rawMaster, prepRecipes, recipeMaster, yieldMap, vendorData };
 };
 
+/**
+ * 夜間バッチ（runDailyPosImportAndPlanNextDay）は店舗ごとに独立したGAS実行（キュー）になったため、
+ * loadSharedSimulationMasters_ をメモリ上で使い回すことができない。CacheService（実行をまたいで
+ * 共有できる）に各フィールドを個別キーで保存し、後続の店舗実行はシート読み込みをスキップする。
+ * フィールド単位でキャッシュするのは、1フィールドがCacheServiceの1キーあたり100KB上限を超えても
+ * 他のフィールドまでキャッシュ不可にしないため。
+ */
+const SHARED_MASTERS_CACHE_PREFIX_ = "SHARED_SIM_MASTER_";
+const SHARED_MASTERS_CACHE_TTL_SEC_ = 1200; // 20分（夜間キューの店舗チェーン全体をカバーするのに十分）
+const SHARED_MASTERS_CACHE_FIELDS_ = ["nameUnifyMap", "rawMaster", "prepRecipes", "recipeMaster", "yieldMap", "vendorData"];
+
+const loadSharedSimulationMastersCached_ = (ss) => {
+  let cache = CacheService.getScriptCache();
+  let result = {};
+  let missing = [];
+
+  SHARED_MASTERS_CACHE_FIELDS_.forEach((field) => {
+    let raw = null;
+    try {
+      raw = cache.get(SHARED_MASTERS_CACHE_PREFIX_ + field);
+    } catch (err) {
+      raw = null;
+    }
+    if (raw) {
+      try {
+        result[field] = JSON.parse(raw);
+        return;
+      } catch (err) {
+        // 壊れていたらシートから読み直す
+      }
+    }
+    missing.push(field);
+  });
+
+  if (missing.length === 0) return result;
+
+  let fresh = loadSharedSimulationMasters_(ss);
+  missing.forEach((field) => {
+    result[field] = fresh[field];
+    try {
+      cache.put(SHARED_MASTERS_CACHE_PREFIX_ + field, JSON.stringify(fresh[field]), SHARED_MASTERS_CACHE_TTL_SEC_);
+    } catch (err) {
+      Logger.log(`[共有マスタキャッシュ] ${field} の保存をスキップ（サイズ超過等）: ${err.message}`);
+    }
+  });
+  return result;
+};
+
+/** 夜間バッチ開始時に前回分の共有マスタキャッシュを破棄（直前の編集を確実に反映するため） */
+const clearSharedSimulationMastersCache_ = () => {
+  let cache = CacheService.getScriptCache();
+  SHARED_MASTERS_CACHE_FIELDS_.forEach((field) => {
+    cache.remove(SHARED_MASTERS_CACHE_PREFIX_ + field);
+  });
+};
+
+/**
+ * バックログの「発注」区分行から、シミュレーション期間の「過去」区間（棚卸し基準日〜指示書基準日、
+ * ＝実際に発注が起きているはずの区間）に発注済みの商材を読み、
+ * 「発注日インデックス→商材名→{納品日インデックス, 数量}」のマップを作る。
+ * executeCoreSimulation側で、この発注日に該当商材の自己投影(calcForwardLookingOrderQty)を
+ * 行う代わりにこの実データをそのまま採用させるために使う
+ * （2026-08-25、Infomart実データによる理論在庫の裏付け対応の一環）。
+ * 納品予定日が空、またはシミュレーション期間外の行（O列手動発注や"manual"設定時の従来コミット行、
+ * 期間外納品）は対象外とし、該当（発注日,商材）は従来通り自己投影にフォールバックさせる
+ * （中途半端な実データで誤った上書きをしないための安全側の設計）。
+ * @return {{[orderDayIdx: number]: {[rName: string]: {deliveryDayIdx: number, qty: number}}}}
+ */
+const buildRealArrivalsFromBacklog_ = (backlogSheet, targetDatesStr, orderDateStr, nameUnifyMap, rawMaster) => {
+  let realArrivals = {};
+  if (!backlogSheet || !targetDatesStr || targetDatesStr.length === 0) return realArrivals;
+
+  let meta = ensureBacklogSheetMeta_(backlogSheet);
+  if (!meta) return realArrivals;
+
+  let idxDate = meta.headers.indexOf("日付");
+  let idxName = meta.headers.indexOf("商材名");
+  let idxKind = meta.headers.indexOf("分類");
+  let idxDelivery = meta.headers.indexOf("納品予定日");
+  let idxMinQty = meta.headers.indexOf("最小単位量");
+  if (idxDate < 0 || idxName < 0 || idxKind < 0 || idxDelivery < 0 || idxMinQty < 0) return realArrivals;
+
+  let numCols = meta.numCols || meta.headers.length;
+  let startRow = meta.dataStartRow + 1;
+  let lastRow = backlogSheet.getLastRow();
+  if (lastRow < startRow) return realArrivals;
+
+  let dayIndexByDateStr = {};
+  targetDatesStr.forEach((d, i) => { dayIndexByDateStr[d] = i; });
+
+  let rows = backlogSheet.getRange(startRow, 1, lastRow - startRow + 1, numCols).getValues();
+  rows.forEach((row) => {
+    if (String(row[idxKind]).trim() !== "発注") return;
+    let orderRowDateStr = formatSheetDateToKey(row[idxDate]);
+    if (!orderRowDateStr || orderRowDateStr < targetDatesStr[0] || orderRowDateStr > orderDateStr) return;
+    let orderDayIdx = dayIndexByDateStr[orderRowDateStr];
+    if (orderDayIdx === undefined) return;
+
+    let deliveryDateStr = formatSheetDateToKey(row[idxDelivery]);
+    if (!deliveryDateStr) return; // 納品予定日なし→この（発注日,商材）は自己投影にフォールバック
+    let deliveryDayIdx = dayIndexByDateStr[deliveryDateStr];
+    if (deliveryDayIdx === undefined) return; // 納品予定日がシミュレーション期間外→同上
+
+    let minQty = Number(row[idxMinQty]) || 0;
+    if (minQty <= 0) return;
+    let canonicalName = resolveCanonicalName_(String(row[idxName]).trim(), nameUnifyMap);
+    if (!rawMaster[canonicalName]) return;
+
+    if (!realArrivals[orderDayIdx]) realArrivals[orderDayIdx] = {};
+    if (!realArrivals[orderDayIdx][canonicalName]) {
+      realArrivals[orderDayIdx][canonicalName] = { deliveryDayIdx: deliveryDayIdx, qty: 0 };
+    }
+    // 同一発注日・同一商材で納品日が複数に分かれるケースは稀と想定し、最初に見つかった納品日を採用する
+    realArrivals[orderDayIdx][canonicalName].qty += minQty;
+  });
+
+  return realArrivals;
+};
+
 const buildSimulationContext = (simStartDate, simDays, periodMode, orderDate, options) => {
   options = options || {};
   const ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -67,7 +186,22 @@ const buildSimulationContext = (simStartDate, simDays, periodMode, orderDate, op
   // 対象月として読み込まれるよう、遡り境界日もキー一覧に含める
   let biasLookbackAnchorStr = addDaysToDateStr_(targetDatesStr[0], -(SALES_BIAS_LOOKBACK_DAYS_ * 2));
   let budgetLoadDateKeys = targetDatesStr.concat([biasLookbackAnchorStr]);
-  let budgetActualData = loadBudgetAndActualData(budgetSheet, budgetAnchor, budgetLoadDateKeys);
+
+  // 実績出数ログは「予算・実績」のD2月をまたぐ日付の売上推定（loadBudgetAndActualData）に使うため、
+  // 予算・実績のロードより先に読み込む
+  let actualSalesLogData = {};
+  try {
+    let selectedStore = resolveSelectedSmaregiStore_(budgetSheet);
+    actualSalesLogData = loadActualSalesLogData(ss.getSheetByName(SHEET_NAMES.ACTUAL_SALES_LOG), selectedStore.storeId);
+  } catch (err) {
+    Logger.log(`[実績出数] 対象店舗が未選択のため実績データはスキップ: ${err.message}`);
+  }
+
+  let holidayCache = {};
+  preWarmHolidayCache_({ targetDatesStr: budgetLoadDateKeys }, holidayCache);
+  let budgetActualData = loadBudgetAndActualData(
+    budgetSheet, budgetAnchor, budgetLoadDateKeys, actualSalesLogData, holidayCache
+  );
   let vendorData = options.vendorData || loadSTVendorCalendar(vendorSheet);
   let yieldMap = options.yieldMap || loadYieldMaster(yieldSheet, nameUnifyMap);
   logYieldMasterWarnings_(yieldMap, prepRecipes);
@@ -82,16 +216,18 @@ const buildSimulationContext = (simStartDate, simDays, periodMode, orderDate, op
     posTotalSalesQty += Number(r.salesQty) || 0;
   });
 
-  let actualSalesLogData = {};
-  try {
-    let selectedStore = resolveSelectedSmaregiStore_(budgetSheet);
-    actualSalesLogData = loadActualSalesLogData(ss.getSheetByName(SHEET_NAMES.ACTUAL_SALES_LOG), selectedStore.storeId);
-  } catch (err) {
-    Logger.log(`[実績出数] 対象店舗が未選択のため実績データはスキップ: ${err.message}`);
-  }
-
   let backlogSheet = storeSheets.backlogSheet;
   let backlogMeta = backlogSheet ? findSheetHeaderMeta(backlogSheet, ["日付", "商材名", "分類"]) : null;
+
+  // 発注バックログ取得元がInfomartのときだけ実データ入荷マップを作る（"manual"時は空のまま渡し、
+  // executeCoreSimulation側は従来通りcalcForwardLookingOrderQtyの自己投影のみを使う＝ロールバック時は
+  // このフラグ1つで自動的に旧挙動へ戻る）。
+  let realArrivals = {};
+  if (getInfomartOrderBacklogSource_() === "infomart") {
+    realArrivals = buildRealArrivalsFromBacklog_(
+      backlogSheet, targetDatesStr, formatJstDate_(orderDate || simStartDate), nameUnifyMap, rawMaster
+    );
+  }
 
   let orderSheet = storeSheets.orderSheet;
   let averageSpend = 4000;
@@ -124,6 +260,7 @@ const buildSimulationContext = (simStartDate, simDays, periodMode, orderDate, op
     posTotalSalesQty: posTotalSalesQty,
     actualSalesLogData: actualSalesLogData,
     backlogMeta: backlogMeta,
+    realArrivals: realArrivals,
     averageSpend: averageSpend,
     nameUnifyMap: nameUnifyMap,
     yieldMap: yieldMap
@@ -697,7 +834,15 @@ const loadStockTakingData = (sheet, unifyMap, rawMaster, prepRecipes) => {
   return { rawStock: rawStock, prepStock: prepStock };
 };
 
-const loadBudgetAndActualData = (sheet, simulationStartDate, simulationDateKeys) => {
+/**
+ * 予算・実績シートは D2 で選択した1ヶ月分の実データしか持たない（列Aは1〜31の日番号のみで
+ * 年月の概念がシート上に無い「月替わり単一ビュー」のため、D2と違う月として読もうとすると
+ * 表示中の月の数値を別の月の日付として誤読み込みしてしまう（月末月初にシミュレーション期間が
+ * 月をまたぐと起きる既知の不具合だった）。
+ * そのためシート実データはD2の月だけを信頼し、それ以外の対象日・D2月内でも予算未入力(0)の日は
+ * 実績出数ログの実績（過去分）または同曜日ベースの推定（未来分・祝日区分の近い日で近似）で埋める。
+ */
+const loadBudgetAndActualData = (sheet, simulationStartDate, simulationDateKeys, actualSalesLogData, holidayCache) => {
   let budgetActualData = {};
   if (!sheet) return budgetActualData;
 
@@ -707,13 +852,55 @@ const loadBudgetAndActualData = (sheet, simulationStartDate, simulationDateKeys)
     return budgetActualData;
   }
 
-  let monthsToLoad = collectBudgetMonthsToLoad_(sheet, simulationStartDate, simulationDateKeys);
-  monthsToLoad.forEach((ym) => {
-    loadBudgetMonthIntoMap_(meta, ym.year, ym.month, budgetActualData);
+  let d2Ym = findBudgetYearMonthFromD2_(sheet);
+  if (d2Ym) {
+    loadBudgetMonthIntoMap_(meta, d2Ym.year, d2Ym.month, budgetActualData);
+  } else if (simulationStartDate && !isNaN(new Date(simulationStartDate).getTime())) {
+    // D2が読めない異常系のみ、従来どおりシミュレーション開始日の月として読む
+    let ref = new Date(simulationStartDate);
+    loadBudgetMonthIntoMap_(meta, ref.getFullYear(), ref.getMonth(), budgetActualData);
+  }
+
+  let estimatedCount = 0;
+  (simulationDateKeys || []).forEach((dateStr) => {
+    if (!dateStr) return;
+    let existing = budgetActualData[dateStr];
+    let needsFallback = !existing || (!existing.hasActual && (!existing.budget || existing.budget <= 0));
+    if (!needsFallback) return;
+
+    let actualTotal = sumDailyActualFromLog_(actualSalesLogData, dateStr);
+    if (actualTotal != null) {
+      budgetActualData[dateStr] = { budget: 0, actual: actualTotal, hasActual: true };
+      return;
+    }
+
+    let fallback = estimateFallbackDailySalesAmount_(dateStr, actualSalesLogData, holidayCache);
+    if (fallback) {
+      budgetActualData[dateStr] = {
+        budget: fallback.amount,
+        actual: null,
+        hasActual: false,
+        estimated: true,
+        estimatedFrom: fallback.sourceDateStr
+      };
+      estimatedCount++;
+    }
   });
 
-  Logger.log(`[完了] 予算・実績データを ${Object.keys(budgetActualData).length} 件ロード（${monthsToLoad.length}ヶ月分）`);
+  Logger.log(
+    `[完了] 予算・実績データを ${Object.keys(budgetActualData).length} 件ロード`
+    + `（D2月=${d2Ym ? formatBudgetYearMonthLabel_(d2Ym.year, d2Ym.month) : "不明"} / 推定補完${estimatedCount}件）`
+  );
   return budgetActualData;
+};
+
+/** 実績出数ログ（日付ごとの明細配列）から、その日の合計実績売上を合算する。データが無ければ null */
+const sumDailyActualFromLog_ = (actualSalesLogData, dateStr) => {
+  let rows = actualSalesLogData && actualSalesLogData[dateStr];
+  if (!rows || rows.length === 0) return null;
+  let total = 0;
+  rows.forEach((r) => { total += Number(r.salesAmount) || 0; });
+  return total;
 };
 
 /** 原価率計算に必要なマスタのみロード */
@@ -735,57 +922,28 @@ const loadCostCalcMasters_ = (ss) => {
   };
 };
 
-/** 予算・実績の年月候補（D2 と対象日） */
-const collectBudgetYearMonthCandidates_ = (budgetSheet, dateStr) => {
-  let ymCandidates = [];
-  let seenYm = {};
-
-  const pushYm_ = (year, month) => {
-    let key = year + "-" + month;
-    if (seenYm[key]) return;
-    seenYm[key] = true;
-    ymCandidates.push({ year: year, month: month });
-  };
-
-  let d2Ym = findBudgetYearMonthFromD2_(budgetSheet);
-  if (d2Ym) pushYm_(d2Ym.year, d2Ym.month);
-  if (dateStr) {
-    let target = parseJstDateStr_(dateStr);
-    pushYm_(target.getFullYear(), target.getMonth());
-  }
-  return ymCandidates;
-};
-
 /**
  * 予算・実績シートの日付行を解決（yyyy-MM-dd）
- * meta.fullData を使い日付列の getRange を省略
+ * meta.fullData を使い日付列の getRange を省略。
+ * シートはD2で選択した1ヶ月分の実データしか持たないため、対象日がD2の月と一致しない場合は
+ * （誤った月の行に書き込む/読み込むことを避けるため）該当行なしとして null を返す。
  */
 const findBudgetRowForDate_ = (budgetSheet, dateStr, cachedMeta) => {
   let meta = cachedMeta || findHeaderRowAndIndices(budgetSheet, ["日付", "予算", "実績"]);
   if (!meta) return null;
 
   let target = parseJstDateStr_(dateStr);
+  let d2Ym = findBudgetYearMonthFromD2_(budgetSheet);
+  if (!d2Ym || target.getFullYear() !== d2Ym.year || target.getMonth() !== d2Ym.month) return null;
+
   let dayOfMonth = target.getDate();
-  let ymCandidates = collectBudgetYearMonthCandidates_(budgetSheet, dateStr);
   let idxDate = meta.headers.indexOf("日付");
   if (idxDate < 0) return null;
 
-  for (let y = 0; y < ymCandidates.length; y++) {
-    let ym = ymCandidates[y];
-    for (let i = meta.dataStartRow; i < meta.fullData.length; i++) {
-      let dayNum = parseBudgetDayOfMonth_(meta.fullData[i][idxDate]);
-      if (isNaN(dayNum) || dayNum !== dayOfMonth) continue;
-
-      let d = new Date(ym.year, ym.month, dayNum);
-      if (isNaN(d.getTime()) || d.getMonth() !== ym.month) continue;
-      if (formatJstDate_(d) !== dateStr) continue;
-
-      return {
-        sheetRow: i + 1,
-        headers: meta.headers,
-        meta: meta
-      };
-    }
+  for (let i = meta.dataStartRow; i < meta.fullData.length; i++) {
+    let dayNum = parseBudgetDayOfMonth_(meta.fullData[i][idxDate]);
+    if (isNaN(dayNum) || dayNum !== dayOfMonth) continue;
+    return { sheetRow: i + 1, headers: meta.headers, meta: meta };
   }
   return null;
 };
@@ -840,15 +998,29 @@ const readBudgetDailyCostRatio_ = (budgetSheet, dateStr, cachedMeta, cachedRowIn
   return parseRatioCellValue_(budgetSheet.getRange(rowInfo.sheetRow, idxDaily + 1).getValue());
 };
 
-/** 予算・実績の期間売上合計（実績優先、なければ予算） */
+/**
+ * 予算・実績の期間売上合計（実績優先、なければ予算）
+ * 週次原価率などD2の月をまたぐ期間もあるため、D2月外の日は実績出数ログ/同曜日推定で補う
+ */
 const sumBudgetActualSalesForPeriod_ = (budgetSheet, fromDateStr, toDateStr) => {
   let dateKeys = enumerateDateKeys_(fromDateStr, toDateStr);
   if (dateKeys.length === 0) return 0;
 
+  let actualSalesLogData = {};
+  try {
+    let ss = budgetSheet.getParent();
+    let selectedStore = resolveSelectedSmaregiStore_(budgetSheet);
+    actualSalesLogData = loadActualSalesLogData(ss.getSheetByName(SHEET_NAMES.ACTUAL_SALES_LOG), selectedStore.storeId);
+  } catch (err) {
+    Logger.log(`[週次原価率] 実績出数ログの読み込みをスキップ: ${err.message}`);
+  }
+
   let budgetActualData = loadBudgetAndActualData(
     budgetSheet,
     parseJstDateStr_(dateKeys[0]),
-    dateKeys
+    dateKeys,
+    actualSalesLogData,
+    {}
   );
 
   let total = 0;
@@ -858,38 +1030,6 @@ const sumBudgetActualSalesForPeriod_ = (budgetSheet, fromDateStr, toDateStr) => 
     total += resolveDailySalesBase_(ba).amount;
   });
   return total;
-};
-
-/** シミュレーション範囲と D2 から読み込む年月の一覧 */
-const collectBudgetMonthsToLoad_ = (sheet, simulationStartDate, simulationDateKeys) => {
-  let seen = {};
-  let list = [];
-
-  const addYm_ = (year, month) => {
-    let key = year + "-" + month;
-    if (seen[key]) return;
-    seen[key] = true;
-    list.push({ year: year, month: month });
-  };
-
-  let d2 = sheet ? findBudgetYearMonthFromD2_(sheet) : null;
-  if (d2) addYm_(d2.year, d2.month);
-
-  if (simulationStartDate && !isNaN(new Date(simulationStartDate).getTime())) {
-    let ref = new Date(simulationStartDate);
-    addYm_(ref.getFullYear(), ref.getMonth());
-  }
-
-  (simulationDateKeys || []).forEach((dateStr) => {
-    if (!dateStr) return;
-    let d = new Date(String(dateStr).trim() + "T12:00:00");
-    if (!isNaN(d.getTime())) addYm_(d.getFullYear(), d.getMonth());
-  });
-
-  if (list.length === 0) {
-    addYm_(new Date().getFullYear(), new Date().getMonth());
-  }
-  return list;
 };
 
 const loadBudgetMonthIntoMap_ = (meta, year, month, budgetActualData) => {

@@ -1,0 +1,6 @@
+{
+  "response_type": "json",
+  "batch_id": "string",
+  "seq_from": "string",
+  "seq_to": "string"
+}
