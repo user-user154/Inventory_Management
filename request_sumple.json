@@ -1,0 +1,48 @@
+{
+  "response_type": "json",
+  "target_date_set": "string",
+  "target_date_from": "yyyy-MM-dd",
+  "target_date_to": "yyyy-MM-dd",
+  "status_set": "string",
+  "status_code": [
+    {}
+  ],
+  "use_ac_svc": "string",
+  "perusal_flg": "string",
+  "not_downloaded_flg": "string",
+  "comment_exist": "string",
+  "mod_flg": "string",
+  "resend_flg": "string",
+  "item_code_kind": "string",
+  "item_code": "string",
+  "trade_id": [
+    {}
+  ],
+  "client_member_codes": [
+    {}
+  ],
+  "client_group_codes": [
+    {}
+  ],
+  "client_codes": [
+    {}
+  ],
+  "delivery_place_id": [
+    {}
+  ],
+  "member_codes": [
+    {}
+  ],
+  "member_group_codes": [
+    {}
+  ],
+  "group_codes": [
+    {}
+  ],
+  "fc_owner_group_codes": [
+    {}
+  ],
+  "fc_owner_member_codes": [
+    {}
+  ]
+}

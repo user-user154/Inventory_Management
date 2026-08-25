@@ -289,9 +289,15 @@ const executeCoreSimulation = (ctx) => {
       orderOptions.skipDeliveryBuffered = true;
     }
 
+    let realArrivalsToday = (d <= orderDayIdx && ctx.realArrivals) ? ctx.realArrivals[d] : null;
+
     for (let ri = 0; ri < activeRawNames.length; ri++) {
       let rName = activeRawNames[ri];
       let rawRow = ctx.rawMaster[rName];
+
+      // Infomart実データがある（d, rName）は最終的にこのループの後で上書きするが、14kg合算ルールの
+      // 対象プールに含める必要があるため自己投影自体はスキップせず通常通り計算しておく
+      // （実データでの最終上書きはapplyVendor14KgLotRuleの後・在庫反映の前で行う）。
       let stockVal = inventoryStockSnapshot
         ? (inventoryStockSnapshot[rName] || 0)
         : Math.max(0, currentStock[rName] || 0);
@@ -321,6 +327,24 @@ const executeCoreSimulation = (ctx) => {
       todayResults.orders, ctx, d, currentStock,
       dailyTotalBufferedAmounts, precomputedConsumption, holidayCache, lot14Options
     );
+
+    // Infomart実データでこの発注日・商材の実発注が確認できている場合、自己投影(14kg合算含む)の
+    // 結果を破棄し、実際の発注数量・納品予定日で置き換える（在庫反映の直前に行うことで、
+    // 14kg合算ルールが実データを不当に増減させたり、実データが14kgプール計算を歪めたりしない）。
+    // 2026-08-25、理論在庫の実データ裏付け対応。
+    if (realArrivalsToday) {
+      Object.keys(realArrivalsToday).forEach((rName) => {
+        let realEntry = realArrivalsToday[rName];
+        let rawRow = ctx.rawMaster[rName];
+        todayResults.orders[rName] = {
+          aiQty: realEntry.qty,
+          unit: getMinUnitLabel(rawRow),
+          vendor: rawRow ? rawRow.vendor : "",
+          reason: "Infomart実データ（確定済み発注・納品予定日ベース）",
+          deliveryDayIdx: realEntry.deliveryDayIdx
+        };
+      });
+    }
 
     if (d === orderDayIdx) {
       Object.keys(todayResults.orders).forEach((rName) => {

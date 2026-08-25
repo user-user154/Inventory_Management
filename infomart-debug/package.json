@@ -1,0 +1,13 @@
+{
+  "name": "infomart-debug",
+  "private": true,
+  "version": "1.0.0",
+  "description": "InfomartAPI連携をGASを介さずターミナルで検証するためのCLI（infomart.gsの検証用移植）",
+  "main": "cli.js",
+  "scripts": {
+    "infomart": "node cli.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
