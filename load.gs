@@ -998,6 +998,18 @@ const readBudgetDailyCostRatio_ = (budgetSheet, dateStr, cachedMeta, cachedRowIn
   return parseRatioCellValue_(budgetSheet.getRange(rowInfo.sheetRow, idxDaily + 1).getValue());
 };
 
+/** 予算・実績の指定日・「実績」列を読み取る（行/列が無い・数値でなければnull） */
+const readBudgetActualAtDate_ = (budgetSheet, dateStr, cachedMeta, cachedRowInfo) => {
+  let rowInfo = cachedRowInfo || findBudgetRowForDate_(budgetSheet, dateStr, cachedMeta);
+  if (!rowInfo) return null;
+
+  let idxActual = findExactHeaderColumn_(rowInfo.headers, "実績");
+  if (idxActual < 0) return null;
+
+  let n = Number(budgetSheet.getRange(rowInfo.sheetRow, idxActual + 1).getValue());
+  return isNaN(n) ? null : n;
+};
+
 /**
  * 予算・実績の期間売上合計（実績優先、なければ予算）
  * 週次原価率などD2の月をまたぐ期間もあるため、D2月外の日は実績出数ログ/同曜日推定で補う
