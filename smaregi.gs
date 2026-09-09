@@ -719,3 +719,159 @@ const setupSmaregiVerifyTrigger = () => {
     + (removed > 0 ? `既存トリガー${removed}件を置き換えました。` : "")
   );
 };
+
+// ---------------------------------------------------------------------------
+// 商品構成比レポート（店舗別・月次比較。実績出数ログの蓄積分から集計）
+// ---------------------------------------------------------------------------
+
+const SALES_MIX_REPORT_HEADERS_ = [
+  "統一商品名", "対象月_販売点数", "対象月_構成比", "比較月_販売点数", "比較月_構成比", "構成比差分(pt)"
+];
+
+/**
+ * 基準日から「対象月（前月）」「比較月（前々月）」を暦月（月初〜月末）で解決する。
+ * 月初のトリガーで「締まったばかりの前月」を「その前の月」と比較する運用を想定。
+ */
+const resolveSalesMixReportMonths_ = (referenceDate) => {
+  let ref = referenceDate ? new Date(referenceDate) : new Date();
+
+  const monthRange = (yearsAgoMonths) => {
+    let d = new Date(ref.getFullYear(), ref.getMonth() - yearsAgoMonths, 1);
+    let from = new Date(d.getFullYear(), d.getMonth(), 1);
+    let to = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+    return {
+      fromStr: formatJstDate_(from),
+      toStr: formatJstDate_(to),
+      label: formatBudgetYearMonthLabel_(d.getFullYear(), d.getMonth())
+    };
+  };
+
+  return { target: monthRange(1), compare: monthRange(2) };
+};
+
+/** 実績出数ログから、指定店舗・指定期間（yyyy-MM-dd範囲、両端含む）の商品別販売点数を集計 */
+const aggregateSalesQtyByProductForMonth_ = (logSheet, storeId, fromDateStr, toDateStr) => {
+  let totals = {};
+  let grandTotal = 0;
+  if (!logSheet) return { totals: totals, grandTotal: grandTotal };
+
+  let lastRow = logSheet.getLastRow();
+  if (lastRow < 2) return { totals: totals, grandTotal: grandTotal };
+
+  let values = logSheet.getRange(2, 1, lastRow - 1, ACTUAL_SALES_LOG_HEADERS_.length).getValues();
+  values.forEach((row) => {
+    let rowDateStr = formatSheetDateToKey(row[0]);
+    if (!rowDateStr || rowDateStr < fromDateStr || rowDateStr > toDateStr) return;
+    if (String(row[1]) !== String(storeId)) return;
+
+    let name = String(row[2] || "").trim();
+    let qty = Number(row[3]) || 0;
+    if (!name || qty === 0) return;
+
+    totals[name] = (totals[name] || 0) + qty;
+    grandTotal += qty;
+  });
+
+  return { totals: totals, grandTotal: grandTotal };
+};
+
+/** 対象月・比較月それぞれの構成比を商品ごとに並べる（対象月の構成比が大きい順） */
+const buildSalesMixComparisonRows_ = (ss, storeId, target, compare) => {
+  let logSheet = ss.getSheetByName(SHEET_NAMES.ACTUAL_SALES_LOG);
+  let targetAgg = aggregateSalesQtyByProductForMonth_(logSheet, storeId, target.fromStr, target.toStr);
+  let compareAgg = aggregateSalesQtyByProductForMonth_(logSheet, storeId, compare.fromStr, compare.toStr);
+
+  let names = {};
+  Object.keys(targetAgg.totals).forEach((n) => { names[n] = true; });
+  Object.keys(compareAgg.totals).forEach((n) => { names[n] = true; });
+
+  let rows = Object.keys(names).map((name) => {
+    let tQty = targetAgg.totals[name] || 0;
+    let cQty = compareAgg.totals[name] || 0;
+    let tRatio = targetAgg.grandTotal > 0 ? tQty / targetAgg.grandTotal : 0;
+    let cRatio = compareAgg.grandTotal > 0 ? cQty / compareAgg.grandTotal : 0;
+    return [name, tQty, tRatio, cQty, cRatio, (tRatio - cRatio) * 100];
+  });
+
+  rows.sort((a, b) => { return b[2] - a[2]; });
+  return rows;
+};
+
+/** 商品構成比シートを用意（無ければ店舗別タブとして新規作成） */
+const ensureSalesMixReportSheet_ = (ss, storeName) => {
+  let sheetName = buildStoreSheetName_(SHEET_NAMES.SALES_MIX_REPORT, storeName);
+  return ss.getSheetByName(sheetName) || ss.insertSheet(sheetName);
+};
+
+/** タイトル行（対象月・比較月・生成日時）＋見出し＋データを書き込む（毎回全消去して書き直す） */
+const writeSalesMixReportSheet_ = (sheet, target, compare, rows) => {
+  sheet.clearContents();
+  sheet.getRange(1, 1).setValue(
+    `対象月: ${target.label}（${target.fromStr}〜${target.toStr}） / 比較月: ${compare.label}（${compare.fromStr}〜${compare.toStr}） `
+    + `生成日時: ${Utilities.formatDate(new Date(), "JST", "yyyy-MM-dd HH:mm")}`
+  );
+  sheet.getRange(2, 1, 1, SALES_MIX_REPORT_HEADERS_.length).setValues([SALES_MIX_REPORT_HEADERS_]);
+  if (rows.length === 0) return;
+
+  sheet.getRange(3, 1, rows.length, SALES_MIX_REPORT_HEADERS_.length).setValues(rows);
+  sheet.getRange(3, 3, rows.length, 1).setNumberFormat("0.0%");
+  sheet.getRange(3, 5, rows.length, 1).setNumberFormat("0.0%");
+  sheet.getRange(3, 6, rows.length, 1).setNumberFormat("+0.0;-0.0");
+};
+
+/**
+ * 全店舗ぶん、商品構成比レポート（対象月=前月 vs 比較月=前々月）を生成する（毎月1日ごろの自動トリガー本体）
+ * 元データは実績出数ログ（90日保持）のため、比較月がその範囲外になっている場合は0件になる点に注意。
+ */
+const runMonthlySalesMixReportForAllStores = () => {
+  let ss = SpreadsheetApp.getActiveSpreadsheet();
+  let stores = getSmaregiStores_();
+  if (!stores || stores.length === 0) {
+    notifyUser("スマレジに店舗が1件も見つかりませんでした。", "商品構成比レポート");
+    return;
+  }
+
+  let months = resolveSalesMixReportMonths_(new Date());
+  let succeeded = [];
+  let failed = [];
+
+  stores.forEach((store) => {
+    let storeName = String(store.storeName || "").trim();
+    try {
+      if (!storeName) throw new Error(`storeId=${store.storeId} は店舗名が空です`);
+      let rows = buildSalesMixComparisonRows_(ss, store.storeId, months.target, months.compare);
+      let sheet = ensureSalesMixReportSheet_(ss, storeName);
+      writeSalesMixReportSheet_(sheet, months.target, months.compare, rows);
+      succeeded.push(storeName);
+    } catch (err) {
+      failed.push(`${storeName || store.storeId}: ${err.message}`);
+      Logger.log(`[商品構成比レポート] 店舗「${storeName || store.storeId}」失敗: ${err.message}`);
+    }
+  });
+
+  notifyUser(
+    `商品構成比レポート生成完了 [対象月=${months.target.label} / 比較月=${months.compare.label}]: `
+    + `成功${succeeded.length}店舗（${succeeded.join(", ")}）`
+    + (failed.length > 0 ? ` / 失敗${failed.length}店舗（${failed.join(" / ")}）` : ""),
+    "商品構成比レポート"
+  );
+};
+
+const SALES_MIX_REPORT_TRIGGER_HANDLER_ = "runMonthlySalesMixReportForAllStores";
+
+/** 商品構成比レポートの月次トリガーを設定（毎月1日6:00ごろ。既存トリガーがあれば削除してから作り直す） */
+const setupSalesMixReportTrigger = () => {
+  let removed = 0;
+  ScriptApp.getProjectTriggers().forEach((t) => {
+    if (t.getHandlerFunction() === SALES_MIX_REPORT_TRIGGER_HANDLER_) {
+      ScriptApp.deleteTrigger(t);
+      removed++;
+    }
+  });
+
+  ScriptApp.newTrigger(SALES_MIX_REPORT_TRIGGER_HANDLER_).timeBased().onMonthDay(1).atHour(6).nearMinute(0).create();
+  notifyUser(
+    "商品構成比レポートの月次トリガーを設定しました（毎月1日6:00ごろ、前月と前々月の販売点数構成比を店舗別タブへ出力）。"
+    + (removed > 0 ? `既存トリガー${removed}件を置き換えました。` : "")
+  );
+};

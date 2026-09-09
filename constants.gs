@@ -20,7 +20,8 @@ const SHEET_NAMES = {
   ACTUAL_SALES_LOG: "実績出数ログ",
   INFOMART_INVOICE_LOG: "Infomart請求書ログ",
   INFOMART_ORDER_DELIVERY_LOG: "Infomart受発注ログ",
-  INFOMART_ITEM_MASTER: "Infomart商品マスタ"
+  INFOMART_ITEM_MASTER: "Infomart商品マスタ",
+  SALES_MIX_REPORT: "商品構成比"
 };
 
 const SALES_TAX_RATE = 0.10;

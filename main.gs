@@ -22,6 +22,8 @@ function onOpen() {
     .addItem("スマレジ日次自動取得トリガーを設定（全店舗を毎晩自動処理）", "setupSmaregiDailyTrigger")
     .addItem("前日実績の答え合わせを今すぐ実行（全店舗・ズレていれば上書き）", "runYesterdayPosVerifyAndFix")
     .addItem("前日実績の答え合わせトリガーを設定（全店舗を毎朝5:00ごろ自動処理）", "setupSmaregiVerifyTrigger")
+    .addItem("商品構成比レポートを今すぐ生成（全店舗・前月×前々月）", "runMonthlySalesMixReportForAllStores")
+    .addItem("商品構成比レポートの月次トリガーを設定（毎月1日6:00ごろ自動処理）", "setupSalesMixReportTrigger")
     .addSeparator()
     .addItem("InfomartのPFIDを登録（対象店舗のタブを開いてから実行）", "promptInfomartCredentialRegistration")
     .addItem("Infomart自社会員システムコードを登録（対象店舗のタブを開いてから実行）", "promptInfomartMemberCodeRegistration")
