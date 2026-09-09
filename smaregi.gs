@@ -22,6 +22,13 @@
 const ACTUAL_SALES_LOG_HEADERS_ = ["日付", "店舗", "統一商品名", "販売点数", POS_SALES_HEADER_EX_TAX];
 
 /**
+ * まだ運用（店舗別シート整備・原材料マスタ登録等）が完了していない業態は、
+ * 夜間の全店舗自動実行（runDailyPosImportAndPlanNextDay）でPOSデータ取得の対象から除外する。
+ * 準備が整い次第ここから名前を外せば自動的に対象に含まれるようになる。
+ */
+const SMAREGI_STORE_EXCLUDE_LIST_ = ["炊きたてあり〼"];
+
+/**
  * 実績出数ログの保持日数。シミュレーション側が参照するのは商品別バイアス係数の
  * 遡り参照分（SALES_BIAS_LOOKBACK_DAYS_の2倍=28日、load.gs参照）だけなので、
  * 十分な余裕を持たせて90日にしている。これを超える古い行はwriteActualSalesLogForDate_の
@@ -350,7 +357,7 @@ const importSmaregiDailyActuals_ = (dateStr, store, budgetSheetOverride) => {
 
   let totalAmount = convertPosSalesToExTax(totalIncTax);
   let budgetSheet = budgetSheetOverride || resolveStoreSheetsFromActiveSheet_(ss).budgetSheet;
-  let budgetWritten = budgetSheet ? writeBudgetRatioAtDate_(budgetSheet, dateStr, "実績", totalAmount, "#,##0") : false;
+  let budgetWritten = budgetSheet ? writeBudgetRatioAtDate_(budgetSheet, dateStr, "実績", totalAmount) : false;
 
   notifyUser(
     `スマレジ実績取込完了 [${dateStr} / ${store.storeName || store.storeId}]: ${aggregated.length}商品 / 合計${Math.round(totalAmount).toLocaleString()}円`
@@ -368,18 +375,28 @@ const runSmaregiDailyAutoImport = () => {
 };
 
 /**
- * 毎晩23:10ごろの時間トリガー本体: スマレジの全店舗をループし、各店舗ごとに
+ * 毎晩23:10ごろの時間トリガー本体: スマレジの全店舗について、各店舗ごとに
  * 当日分の実績を取り込み、その実績を使って翌日の仕込み・発注指示を計算し
  * その店舗の指示書へ反映する。例: 23:10に7/1の実績を取込→指示書B2を7/2に設定→7/2の計算を実行。
  * （22:45だと当日の遅い時間帯の取引が取りきれないケースがあったため23:10に変更）
+ *
+ * 店舗数が増えると全店舗を1回の実行でforEachした場合にGASの実行時間上限(6分)に達し、
+ * ループの後方にいる店舗が未処理のまま打ち切られる（実績が抜け落ちる）不具合があったため、
+ * 全店舗を1つの実行で回さず、店舗ごとに独立した実行（1店舗=1回のトリガー起動）へキュー化する。
+ * この関数はキューを積んで最初のトリガーを起動するだけで即座に返り、実際の1店舗分の処理は
+ * processSmaregiDailyQueueItem_ が担う。
  *
  * 時間トリガーには「アクティブシート」という概念が無いため、
  * resolveStoreSheetsFromActiveSheet_ には頼らず、店舗ごとに明示的にシートを解決する。
  * 「発注管理」→「店舗別シートを作成・整備」を先に実行し、各店舗の4シートを用意しておく必要がある
  * （未作成の店舗はスキップしてログに残し、他店舗の処理は継続する）。
  */
+const SMAREGI_DAILY_QUEUE_PROP_KEY_ = "SMAREGI_DAILY_QUEUE_V1";
+const SMAREGI_DAILY_QUEUE_TRIGGER_HANDLER_ = "processSmaregiDailyQueueItem_";
+/** 店舗間の間隔。各店舗を別実行にすることでタイムアウト・時間上限の影響を1店舗分だけに閉じ込める */
+const SMAREGI_DAILY_QUEUE_STEP_DELAY_MS_ = 5000;
+
 const runDailyPosImportAndPlanNextDay = () => {
-  let ss = SpreadsheetApp.getActiveSpreadsheet();
   let stores = getSmaregiStores_();
   if (!stores || stores.length === 0) {
     notifyUser("スマレジに店舗が1件も見つかりませんでした。");
@@ -388,104 +405,133 @@ const runDailyPosImportAndPlanNextDay = () => {
 
   let today = formatJstDate_(new Date());
   let tomorrow = addDaysToDateStr_(today, 1);
-  let succeeded = [];
-  let failed = [];
-  // 原材料・レシピ・歩留まり・名寄せ・仕入先カレンダーは店舗間で共通のため、店舗ループの外側で1回だけ読み込む
-  let sharedMasters = loadSharedSimulationMasters_(ss);
+  let queue = stores
+    .map((s) => ({ storeId: s.storeId, storeName: String(s.storeName || "").trim() }))
+    .filter((s) => SMAREGI_STORE_EXCLUDE_LIST_.indexOf(s.storeName) === -1);
 
-  stores.forEach((store) => {
-    let storeName = String(store.storeName || "").trim();
+  if (queue.length === 0) {
+    notifyUser("対象店舗が0件でした（除外リストで全店舗が対象外になっていないか確認してください）。");
+    return;
+  }
+
+  // 前回実行が途中で止まっていた場合に備え、古いキュー用トリガーを削除してから積み直す
+  clearSmaregiDailyQueueTriggers_();
+  // 共有マスタのキャッシュも今回分として作り直す（直前の編集を確実に反映するため、前回分は破棄）
+  clearSharedSimulationMastersCache_();
+
+  let state = { today: today, tomorrow: tomorrow, queue: queue, succeeded: [], failed: [] };
+  PropertiesService.getScriptProperties().setProperty(SMAREGI_DAILY_QUEUE_PROP_KEY_, JSON.stringify(state));
+
+  ScriptApp.newTrigger(SMAREGI_DAILY_QUEUE_TRIGGER_HANDLER_).timeBased().after(1000).create();
+  notifyUser(`日次自動実行を開始しました（対象${queue.length}店舗・店舗ごとに順次処理。完了時に改めて通知します）`, "日次自動実行");
+};
+
+/**
+ * 夜間キューの先頭1店舗だけを処理し、残っていれば次のトリガーを作って自分は削除する
+ * （1店舗=1回のGAS実行に閉じ込めることで、店舗数が増えても実行時間上限に達しないようにする）
+ */
+const processSmaregiDailyQueueItem_ = (e) => {
+  deleteSmaregiDailyQueueTriggerForEvent_(e);
+
+  let props = PropertiesService.getScriptProperties();
+  let raw = props.getProperty(SMAREGI_DAILY_QUEUE_PROP_KEY_);
+  if (!raw) return; // 別実行で既に完了・削除済み
+
+  let state;
+  try {
+    state = JSON.parse(raw);
+  } catch (err) {
+    props.deleteProperty(SMAREGI_DAILY_QUEUE_PROP_KEY_);
+    Logger.log(`[日次自動実行] キュー破損のため中断: ${err.message}`);
+    return;
+  }
+
+  if (!state.queue || state.queue.length === 0) {
+    props.deleteProperty(SMAREGI_DAILY_QUEUE_PROP_KEY_);
+    finishSmaregiDailyQueue_(state);
+    return;
+  }
+
+  let store = state.queue.shift();
+  try {
+    processOneStoreForDailyQueue_(state, store);
+    state.succeeded.push(store.storeName || store.storeId);
+  } catch (err) {
+    state.failed.push(`${store.storeName || store.storeId}: ${err.message}`);
+    Logger.log(`[日次自動実行] 店舗「${store.storeName || store.storeId}」失敗: ${err.message}`);
+  }
+
+  if (state.queue.length > 0) {
+    props.setProperty(SMAREGI_DAILY_QUEUE_PROP_KEY_, JSON.stringify(state));
+    ScriptApp.newTrigger(SMAREGI_DAILY_QUEUE_TRIGGER_HANDLER_)
+      .timeBased().after(SMAREGI_DAILY_QUEUE_STEP_DELAY_MS_).create();
+  } else {
+    props.deleteProperty(SMAREGI_DAILY_QUEUE_PROP_KEY_);
+    finishSmaregiDailyQueue_(state);
+  }
+};
+
+/** 1店舗分: 当日実績の取込→翌日への月自動切替→指示書日付更新→翌日分の計算実行 */
+const processOneStoreForDailyQueue_ = (state, store) => {
+  let storeName = String(store.storeName || "").trim();
+  if (!storeName) throw new Error(`storeId=${store.storeId} は店舗名が空です`);
+
+  let ss = SpreadsheetApp.getActiveSpreadsheet();
+  let storeSheets = resolveStoreSheetsByStoreName_(ss, storeName);
+  if (!storeSheets.orderSheet || !storeSheets.budgetSheet || !storeSheets.backlogSheet) {
+    throw new Error(`店舗別シート未作成です（「発注管理」→「店舗別シートを作成・整備」を先に実行してください）`);
+  }
+
+  // 当日分の実績は今日の月のD2のまま書き込み、その後に翌日分の月へ自動で切り替える
+  // （月末の最終日はここで翌月に進む。予算未入力の日は buildSimulationContext 側の推定で埋める）
+  importSmaregiDailyActuals_(state.today, store, storeSheets.budgetSheet);
+
+  // 発注バックログ取得元がInfomartの場合、本日ぶんの発注実績をシミュレーション実行前に反映しておく
+  // （Infomartのrequest→check→getは10〜60秒かかるため、シミュレーション中に都度呼ばずここで先に済ませる）。
+  // 失敗しても実績取込・シミュレーション自体は継続する（PFID未登録店舗や一時的なAPI不調で
+  // 夜間バッチ全体が止まらないようにするため）。
+  if (getInfomartOrderBacklogSource_() === "infomart") {
     try {
-      if (!storeName) throw new Error(`storeId=${store.storeId} は店舗名が空です`);
-      let storeSheets = resolveStoreSheetsByStoreName_(ss, storeName);
-      if (!storeSheets.orderSheet || !storeSheets.budgetSheet || !storeSheets.backlogSheet) {
-        throw new Error(`店舗別シート未作成です（「発注管理」→「店舗別シートを作成・整備」を先に実行してください）`);
-      }
-
-      importSmaregiDailyActuals_(today, store, storeSheets.budgetSheet);
-      storeSheets.orderSheet.getRange("B2").setValue(new Date(`${tomorrow}T12:00:00`));
-      runSimulationPipeline(storeSheets, sharedMasters);
-      succeeded.push(storeName);
+      importInfomartOrderBacklogForDate_(state.today, storeName);
     } catch (err) {
-      failed.push(`${storeName || store.storeId}: ${err.message}`);
-      Logger.log(`[日次自動実行] 店舗「${storeName || store.storeId}」失敗: ${err.message}`);
+      Logger.log(`[日次自動実行] 店舗「${storeName}」Infomart発注バックログ取込に失敗（継続します）: ${err.message}`);
     }
-  });
+  }
 
+  advanceBudgetStartDateIfNeeded_(storeSheets.budgetSheet, state.tomorrow);
+  storeSheets.orderSheet.getRange("B2").setValue(new Date(`${state.tomorrow}T12:00:00`));
+  // 各店舗が別々のGAS実行になるため、共有マスタはCacheServiceで使い回す
+  // （1店舗目がロード＆キャッシュし、以降の店舗はシート読み込み無しで再利用する）
+  let sharedMasters = loadSharedSimulationMastersCached_(ss);
+  runSimulationPipeline(storeSheets, sharedMasters);
+};
+
+const finishSmaregiDailyQueue_ = (state) => {
   notifyUser(
-    `日次自動実行完了: 成功${succeeded.length}店舗（${succeeded.join(", ")}）`
-    + (failed.length > 0 ? ` / 失敗${failed.length}店舗（${failed.join(" / ")}）` : ""),
+    `日次自動実行完了: 成功${state.succeeded.length}店舗（${state.succeeded.join(", ")}）`
+    + (state.failed.length > 0 ? ` / 失敗${state.failed.length}店舗（${state.failed.join(" / ")}）` : ""),
     "日次自動実行"
   );
 };
 
-/**
- * 毎朝5:00ごろの時間トリガー本体: 前日分のスマレジ実績を全店舗で取り直し、
- * 「予算・実績」実績列の現在値とズレていれば上書きする（答え合わせ）。
- * POS側の後編集・取消の反映タイミングのズレなどで、23:25の夜間取込み時点では
- * まだ確定していなかった実績が、翌朝までに変わっていることがあるための保険。
- * importSmaregiDailyActuals_ 自体は常に上書きするため、ここでは実行前の値を控えておき、
- * 実行後の値と比較して「実際にズレていた店舗」だけをまとめの通知に出す。
- */
-const runYesterdayPosVerifyAndFix = () => {
-  let ss = SpreadsheetApp.getActiveSpreadsheet();
-  let stores = getSmaregiStores_();
-  if (!stores || stores.length === 0) {
-    notifyUser("スマレジに店舗が1件も見つかりませんでした。", "前日実績の答え合わせ");
-    return;
-  }
-
-  let yesterday = addDaysToDateStr_(formatJstDate_(new Date()), -1);
-  let corrected = [];
-  let failed = [];
-
-  stores.forEach((store) => {
-    let storeName = String(store.storeName || "").trim();
-    try {
-      if (!storeName) throw new Error(`storeId=${store.storeId} は店舗名が空です`);
-      let storeSheets = resolveStoreSheetsByStoreName_(ss, storeName);
-      if (!storeSheets.budgetSheet) {
-        throw new Error("店舗別シート未作成です（「発注管理」→「店舗別シートを作成・整備」を先に実行してください）");
-      }
-
-      let before = readBudgetActualAtDate_(storeSheets.budgetSheet, yesterday);
-      let result = importSmaregiDailyActuals_(yesterday, store, storeSheets.budgetSheet);
-
-      if (before == null || Math.abs(before - result.totalAmount) >= 1) {
-        let beforeLabel = before == null ? "(空欄)" : `${Math.round(before).toLocaleString()}円`;
-        corrected.push(`${storeName}: ${beforeLabel} → ${Math.round(result.totalAmount).toLocaleString()}円`);
-      }
-    } catch (err) {
-      failed.push(`${storeName || store.storeId}: ${err.message}`);
-      Logger.log(`[前日実績の答え合わせ] 店舗「${storeName || store.storeId}」失敗: ${err.message}`);
+/** 前回実行が途中で止まった場合などに残る古いキュー処理用トリガーを削除 */
+const clearSmaregiDailyQueueTriggers_ = () => {
+  ScriptApp.getProjectTriggers().forEach((t) => {
+    if (t.getHandlerFunction() === SMAREGI_DAILY_QUEUE_TRIGGER_HANDLER_) {
+      ScriptApp.deleteTrigger(t);
     }
   });
-
-  notifyUser(
-    `前日(${yesterday})実績の答え合わせ完了: `
-    + (corrected.length > 0 ? `ズレを修正${corrected.length}店舗（${corrected.join(" / ")}）` : "全店舗ズレなし")
-    + (failed.length > 0 ? ` / 失敗${failed.length}店舗（${failed.join(" / ")}）` : ""),
-    "前日実績の答え合わせ"
-  );
 };
 
-const SMAREGI_VERIFY_TRIGGER_HANDLER_ = "runYesterdayPosVerifyAndFix";
-
-/** 前日実績の答え合わせトリガーを設定（毎朝5:00ごろ。旧トリガーや重複があれば削除してから作り直す） */
-const setupSmaregiVerifyTrigger = () => {
-  let removed = 0;
+/** 今しがた発火したトリガー自身だけを削除（イベントにtriggerUidが無い場合は同名トリガーを全削除） */
+const deleteSmaregiDailyQueueTriggerForEvent_ = (e) => {
+  if (!e || !e.triggerUid) {
+    clearSmaregiDailyQueueTriggers_();
+    return;
+  }
   ScriptApp.getProjectTriggers().forEach((t) => {
-    if (t.getHandlerFunction() === SMAREGI_VERIFY_TRIGGER_HANDLER_) {
-      ScriptApp.deleteTrigger(t);
-      removed++;
-    }
+    if (t.getUniqueId() === e.triggerUid) ScriptApp.deleteTrigger(t);
   });
-
-  ScriptApp.newTrigger(SMAREGI_VERIFY_TRIGGER_HANDLER_).timeBased().everyDays(1).atHour(5).nearMinute(0).create();
-  notifyUser(
-    "前日実績の答え合わせトリガーを設定しました（毎朝5:00ごろ、前日分のスマレジ実績を再取得しズレがあれば上書き）。"
-    + (removed > 0 ? `既存トリガー${removed}件を置き換えました。` : "")
-  );
 };
 
 /** 日付を指定して手動再取得（空欄なら本日、対象店舗は開いているタブの予算・実績 D1 の選択に従う） */
@@ -598,9 +644,9 @@ const setupSmaregiDailyTrigger = () => {
     }
   });
 
-  ScriptApp.newTrigger(SMAREGI_DAILY_TRIGGER_HANDLER_).timeBased().everyDays(1).atHour(23).nearMinute(25).create();
+  ScriptApp.newTrigger(SMAREGI_DAILY_TRIGGER_HANDLER_).timeBased().everyDays(1).atHour(23).nearMinute(10).create();
   notifyUser(
-    "スマレジ日次自動取得トリガーを設定しました（毎日23:25ごろ、当日分の実績取得→翌日の仕込み・発注計算まで自動実行）。"
+    "スマレジ日次自動取得トリガーを設定しました（毎日23:10ごろ、当日分の実績取得→翌日の仕込み・発注計算まで自動実行）。"
     + (removed > 0 ? `既存トリガー${removed}件を置き換えました。` : "")
   );
 };

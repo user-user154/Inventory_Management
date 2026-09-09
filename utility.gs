@@ -249,6 +249,31 @@ const convertToMinUnit = (qty, unitStr, rawRow) => {
 };
 
 /**
+ * convertToMinUnit が実際に換算ルールを適用できる単位かどうかを判定するガード。
+ * convertToMinUnit 自身は未知の単位を暗黙に1:1（無換算）として素通りしてしまうため、
+ * Infomartのitem_unit_nameのように外部由来で表記ゆれ・想定外単位が来うる入力では、
+ * 呼び出し前にこれで判定し、falseなら換算せず警告して読み飛ばすこと（誤った理論在庫を防ぐ）。
+ * 判定条件は convertToMinUnit の各分岐条件と対応させてある。
+ */
+const isConvertibleToMinUnit_ = (unitStr, rawRow) => {
+  if (!rawRow) return false;
+  let inputUnit = String(unitStr).trim();
+  let lotUnit = String(rawRow.lotUnit).trim();
+  let orderUnit = String(rawRow.orderUnit).trim();
+
+  if (isMassVolumeLargeUnit(inputUnit)) return true;
+  if (isMassVolumeBaseUnit(inputUnit)) return true;
+  if (unitsEquivalent(inputUnit, lotUnit)) return true;
+  if (unitsEquivalent(inputUnit, orderUnit) || isPackagingUnit(inputUnit)) return true;
+  if (isPackagingUnit(orderUnit) && isCountPieceUnit_(inputUnit)) return true;
+  if (isKakeUnit_(inputUnit) && isCountPieceUnit_(lotUnit)) return true;
+  if (isCountPieceUnit_(inputUnit) && isKakeUnit_(lotUnit)) return true;
+  if (isKakeUnit_(inputUnit) && isKakeUnit_(lotUnit)) return true;
+  if (isCountPieceUnit_(inputUnit) && isCountPieceUnit_(lotUnit)) return true;
+  return false;
+};
+
+/**
  * 仕込み品の単位相互換算（中間レシピ・原材料マスタ参照、g→人前と同型のロット比率）
  * @param {object} [ctx] シミュレーションコンテキスト（原材料マスタ参照用）
  * @return {number|null} 換算後数量（第2引数 from → 仕込み単位）。不可時は null
@@ -370,6 +395,46 @@ const WEEKDAY_JA = ["日", "月", "火", "水", "木", "金", "土"];
 
 const getJapaneseWeekday = (dateObj) => {
   return WEEKDAY_JA[new Date(dateObj).getDay()];
+};
+
+/** 平日/「土日祝」の2区分（月またぎ予測の同質日判定用）。isJapanesePublicHolidayCached は定義順の都合で後方 */
+const isWeekendOrHolidayDate_ = (dateObj, holidayCache) => {
+  let d = new Date(dateObj);
+  let dow = d.getDay(); // 0=日, 6=土
+  if (dow === 0 || dow === 6) return true;
+  return isJapanesePublicHolidayCached(d, holidayCache);
+};
+
+/**
+ * 予算未入力日（月またぎの翌月分・当月でも未入力の日）の売上を実績出数ログの過去実績から推定する。
+ * 基本は「先週の同曜日」。ただし対象日と候補日で 平日/土日祝 の区分が違う場合は
+ * 候補日の近傍（前後1〜7日）で区分が一致する直近の実績日を探し、それでも無ければ
+ * さらに前の週（最大 FALLBACK_SALES_MAX_WEEKS_BACK_ 週）へ遡って同様に探す。
+ * @return {{amount:number, sourceDateStr:string}|null}
+ */
+const FALLBACK_SALES_NEARBY_OFFSETS_ = [0, 1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 6, -6, 7, -7];
+const FALLBACK_SALES_MAX_WEEKS_BACK_ = 6;
+
+const estimateFallbackDailySalesAmount_ = (dateStr, actualSalesLogData, holidayCache) => {
+  if (!dateStr) return null;
+  let targetDate = parseJstDateStr_(dateStr);
+  if (isNaN(targetDate.getTime())) return null;
+  let targetIsHoliday = isWeekendOrHolidayDate_(targetDate, holidayCache);
+
+  for (let week = 1; week <= FALLBACK_SALES_MAX_WEEKS_BACK_; week++) {
+    let baseOffset = -7 * week;
+    for (let j = 0; j < FALLBACK_SALES_NEARBY_OFFSETS_.length; j++) {
+      let candStr = addDaysToDateStr_(dateStr, baseOffset + FALLBACK_SALES_NEARBY_OFFSETS_[j]);
+      let candDate = parseJstDateStr_(candStr);
+      if (isWeekendOrHolidayDate_(candDate, holidayCache) !== targetIsHoliday) continue;
+
+      let total = sumDailyActualFromLog_(actualSalesLogData, candStr);
+      if (total != null && total > 0) {
+        return { amount: total, sourceDateStr: candStr };
+      }
+    }
+  }
+  return null;
 };
 
 const HOLIDAY_CALENDAR_ID_ = "ja.japanese#holiday@group.v.calendar.google.com";
@@ -667,15 +732,23 @@ const findSheetHeaderMeta = (sheet, requiredHeaders) => {
   return null;
 };
 
-/** バックログ列定義（A1 から自動作成） */
+/**
+ * バックログ列定義（A1 から自動作成）
+ * 5列目は元々未使用のプレースホルダ（"—"）だったが、Infomart発注バックログ化にあたり
+ * 「納品予定日」として使用する（列数・位置は不変、既存シートもヘッダーテキストのみ更新で後方互換）。
+ */
 const BACKLOG_HEADERS = [
-  "日付", "商材名", "分類", "数量", "—", "—", "最小単位量", "表示数量", "売上基準"
+  "日付", "商材名", "分類", "数量", "納品予定日", "—", "最小単位量", "表示数量", "売上基準"
 ];
 
 /** 月跨ぎ計算用に前月末付近だけ残す日数 */
 const BACKLOG_MONTH_BRIDGE_DAYS_ = 7;
 
-/** 既存見出しがあればそれを、なければ A1 に BACKLOG_HEADERS を書いて meta を返す */
+/**
+ * 既存見出しがあればそれを、なければ A1 に BACKLOG_HEADERS を書いて meta を返す
+ * 既存シートの5列目が旧プレースホルダ"—"のままなら「納品予定日」へ見出しテキストのみ更新する
+ * （列位置・データは変更しない。Infomart発注バックログ化に伴う一回限りの移行）。
+ */
 const ensureBacklogSheetMeta_ = (sheet) => {
   if (!sheet) return null;
 
@@ -686,7 +759,13 @@ const ensureBacklogSheetMeta_ = (sheet) => {
   ];
   for (let i = 0; i < candidates.length; i++) {
     let meta = findSheetHeaderMeta(sheet, candidates[i]);
-    if (meta) return meta;
+    if (meta) {
+      if (meta.headers[4] === "—") {
+        sheet.getRange(meta.headerRowIdx + 1, 5).setValue("納品予定日");
+        meta.headers[4] = "納品予定日";
+      }
+      return meta;
+    }
   }
 
   sheet.getRange(1, 1, 1, BACKLOG_HEADERS.length).setValues([BACKLOG_HEADERS]);
@@ -1688,12 +1767,16 @@ const SALES_BIAS_CLAMP_MAX_ = 1.15;
 
 /**
  * 日次売上基準: 実績が入力されていれば実績、なければ予算
+ * （予算・実績シートに無い日で、実績出数ログの過去実績や同曜日推定で埋めた場合は「予測ベース」）
  * @return {{ amount: number, baseFlag: string }}
  */
 const resolveDailySalesBase_ = (ba) => {
   if (!ba) return { amount: 0, baseFlag: "予算ベース" };
   if (ba.hasActual) {
     return { amount: Number(ba.actual) || 0, baseFlag: "実績ベース" };
+  }
+  if (ba.estimated) {
+    return { amount: Number(ba.budget) || 0, baseFlag: "予測ベース" };
   }
   return { amount: Number(ba.budget) || 0, baseFlag: "予算ベース" };
 };
@@ -2017,30 +2100,48 @@ const ORDER_SHEET_MANUAL_INPUT = {
   dropdownItems: ["生樽", "炭酸ガス"]
 };
 
-/** 指示書 O2:Q15 の見出しとプルダウンを整備 */
+/**
+ * 指示書 O2:Q15 の見出しとプルダウンを整備
+ * onOpen で全シートぶん毎回呼ばれるため、まず現状をまとめて読み、既に想定通りなら書き込み無しで抜ける
+ * （見出し・単位は初期設定後まず変わらないので、定常状態では読み取りだけで終わる）
+ */
 const setupOrderSheetManualInputArea = (sheet) => {
   if (!sheet || !isOrderFormSheetName_(sheet.getName())) return;
 
   let cfg = ORDER_SHEET_MANUAL_INPUT;
+  let labelRange = sheet.getRange(cfg.labelRow, cfg.nameCol, cfg.headerRow - cfg.labelRow + 1, 3);
+  let labelVals = labelRange.getValues(); // [0]=[O2,P2,Q2] [1]=[O3,P3,Q3]
+  let labelsMatch = labelVals[0][0] === "手動入力"
+    && labelVals[1][0] === "原材料名" && labelVals[1][1] === "数量" && labelVals[1][2] === "単位";
+
+  let unitRange = sheet.getRange(4, cfg.unitCol, 2, 1);
+  let unitVals = unitRange.getValues();
+  let nextUnits = unitVals.map((row) => [String(row[0]).trim() || "本"]);
+  let unitsMatch = unitVals[0][0] === nextUnits[0][0] && unitVals[1][0] === nextUnits[1][0];
+
+  let hasValidation = sheet.getRange(4, cfg.nameCol, 2, 1).getDataValidation() != null;
+
+  if (labelsMatch && unitsMatch && hasValidation) return; // 既に整備済み
+
   let props = PropertiesService.getScriptProperties();
   props.setProperty(CHECKBOX_SKIP_PROPS_.ORDER_FORM, "1");
   try {
-    sheet.getRange("O2").setValue("手動入力");
-    sheet.getRange("O3").setValue("原材料名");
-    sheet.getRange("P3").setValue("数量");
-    sheet.getRange("Q3").setValue("単位");
-
-    let rule = SpreadsheetApp.newDataValidation()
-      .requireValueInList(cfg.dropdownItems, true)
-      .setAllowInvalid(false)
-      .build();
-    // 既存運用の固定行（O4:O5）のみバリデーションを付与し、O6:O15 はユーザー設定を保持する。
-    sheet.getRange(4, cfg.nameCol, 2, 1).setDataValidation(rule);
-
-    // 生樽・炭酸ガスの固定行は初期単位を「本」に揃える。
-    let unitVals = sheet.getRange(4, cfg.unitCol, 2, 1).getValues();
-    let nextUnits = unitVals.map((row) => [String(row[0]).trim() || "本"]);
-    sheet.getRange(4, cfg.unitCol, 2, 1).setValues(nextUnits);
+    if (!labelsMatch) {
+      sheet.getRange(cfg.labelRow, cfg.nameCol).setValue("手動入力");
+      sheet.getRange(cfg.headerRow, cfg.nameCol, 1, 3).setValues([["原材料名", "数量", "単位"]]);
+    }
+    if (!hasValidation) {
+      // 既存運用の固定行（O4:O5）のみバリデーションを付与し、O6:O15 はユーザー設定を保持する。
+      let rule = SpreadsheetApp.newDataValidation()
+        .requireValueInList(cfg.dropdownItems, true)
+        .setAllowInvalid(false)
+        .build();
+      sheet.getRange(4, cfg.nameCol, 2, 1).setDataValidation(rule);
+    }
+    if (!unitsMatch) {
+      // 生樽・炭酸ガスの固定行は初期単位を「本」に揃える。
+      unitRange.setValues(nextUnits);
+    }
   } finally {
     props.deleteProperty(CHECKBOX_SKIP_PROPS_.ORDER_FORM);
   }
@@ -2243,7 +2344,7 @@ const ORDER_SHEET_B1_TRIGGER_ = { row: 1, col: 2, a1: "B1", label: "実行" };
 /** A1 プルダウン選択肢 → 実行関数 */
 const ORDER_SHEET_ACTION_MENU_ = [
   { label: "①計算実行", action: "runSimulationPipeline" },
-  { label: "②確定コミット", action: "commitOrderSheetToBacklogAndLog" },
+  { label: "②仕込み実績を確定", action: "commitOrderSheetToBacklogAndLog" },
   { label: "③データ整理", action: "formatPosRawToClean" },
   { label: "④週次原価率計算", action: "runWeeklyFoodCostRatioPipeline" }
 ];
@@ -2280,6 +2381,11 @@ const formatBudgetYearMonthLabel_ = (year, month) => {
   return `${year}年${month + 1}月`;
 };
 
+/**
+ * onOpen で全店舗ぶん毎回呼ばれるため、選択肢レンジが既に現在月基準にスライド済みなら
+ * バリデーションの再設定はスキップする（選択肢の一番先（未来側）が一致するかだけで判定）。
+ * 実際にレンジが動くのは月が変わったタイミングだけなので、定常状態では読み取りだけで終わる。
+ */
 const setupBudgetStartDateDropdown_ = (budgetSheet) => {
   if (!budgetSheet) return;
 
@@ -2293,18 +2399,25 @@ const setupBudgetStartDateDropdown_ = (budgetSheet) => {
     options.push(formatBudgetYearMonthLabel_(d.getFullYear(), d.getMonth()));
   }
 
+  let cell = budgetSheet.getRange(BUDGET_START_DATE_CELL_);
+  let existingRule = cell.getDataValidation();
+  let existingValues = existingRule ? (existingRule.getCriteriaValues()[0] || []) : [];
+  let rangeUpToDate = existingValues.length === options.length
+    && existingValues[existingValues.length - 1] === options[options.length - 1];
+
+  let current = String(cell.getValue() || "").trim();
+  if (rangeUpToDate && options.indexOf(current) !== -1) return;
+
   let props = PropertiesService.getScriptProperties();
   props.setProperty("SKIP_BUDGET_WEEKDAY_ONEDIT", "1");
   try {
-    let cell = budgetSheet.getRange(BUDGET_START_DATE_CELL_);
-
-    let rule = SpreadsheetApp.newDataValidation()
-      .requireValueInList(options, true)
-      .setAllowInvalid(false)
-      .build();
-    cell.setDataValidation(rule);
-
-    let current = String(cell.getValue() || "").trim();
+    if (!rangeUpToDate) {
+      let rule = SpreadsheetApp.newDataValidation()
+        .requireValueInList(options, true)
+        .setAllowInvalid(false)
+        .build();
+      cell.setDataValidation(rule);
+    }
     if (options.indexOf(current) === -1) {
       cell.setValue(formatBudgetYearMonthLabel_(baseYear, baseMonth));
     }
@@ -2313,27 +2426,65 @@ const setupBudgetStartDateDropdown_ = (budgetSheet) => {
   }
 };
 
-/** 指示書 A1 プルダウンと B1 チェックボックスを整備 */
+/**
+ * 月末の夜間自動実行（runDailyPosImportAndPlanNextDay）で、D2 が翌日の月とズレていたら
+ * 自動で切り替える（月末最終日の翌日=翌月1日プランニング時に発生）。
+ * 予算・実績シートは1ヶ月分の実データしか持たないため、D2を進めた直後の新しい月は
+ * 予算が未入力（=0）になる。その分は buildSimulationContext 側の推定ロジックで埋める。
+ * @return {boolean} 実際に切り替えたか
+ */
+const advanceBudgetStartDateIfNeeded_ = (budgetSheet, targetDateStr) => {
+  if (!budgetSheet || !targetDateStr) return false;
+  let target = parseJstDateStr_(targetDateStr);
+  if (isNaN(target.getTime())) return false;
+
+  let d2Ym = findBudgetYearMonthFromD2_(budgetSheet);
+  if (d2Ym && d2Ym.year === target.getFullYear() && d2Ym.month === target.getMonth()) return false;
+
+  let label = formatBudgetYearMonthLabel_(target.getFullYear(), target.getMonth());
+  let props = PropertiesService.getScriptProperties();
+  props.setProperty("SKIP_BUDGET_WEEKDAY_ONEDIT", "1");
+  try {
+    budgetSheet.getRange(BUDGET_START_DATE_CELL_).setValue(label);
+  } finally {
+    props.deleteProperty("SKIP_BUDGET_WEEKDAY_ONEDIT");
+  }
+  fillBudgetWeekdaysFromStartDate(budgetSheet);
+  Logger.log(`[予算・実績] D2を${label}へ自動切替（対象日=${targetDateStr}）`);
+  return true;
+};
+
+/**
+ * 指示書 A1 プルダウンと B1 チェックボックスを整備
+ * onOpen で全シートぶん毎回呼ばれるため、既に整備済みなら書き込み無しで早期returnする
+ * （バリデーション有無の読み取り2回だけで済ませ、店舗数が増えても開くたびの負荷を増やさない）
+ */
 const setupOrderSheetActionControls_ = (sheet) => {
   if (!sheet || !isOrderFormSheetName_(sheet.getName())) return;
+
+  let a1 = sheet.getRange(ORDER_SHEET_ACTION_DROPDOWN_.row, ORDER_SHEET_ACTION_DROPDOWN_.col);
+  let b1 = sheet.getRange(ORDER_SHEET_B1_TRIGGER_.row, ORDER_SHEET_B1_TRIGGER_.col);
+  let a1HasValidation = a1.getDataValidation() != null;
+  let b1HasValidation = b1.getDataValidation() != null;
+  if (a1HasValidation && b1HasValidation) return;
 
   let props = PropertiesService.getScriptProperties();
   props.setProperty(CHECKBOX_SKIP_PROPS_.ORDER_FORM, "1");
   try {
-    let labels = ORDER_SHEET_ACTION_MENU_.map((item) => item.label);
-    let a1 = sheet.getRange(ORDER_SHEET_ACTION_DROPDOWN_.row, ORDER_SHEET_ACTION_DROPDOWN_.col);
-    let current = String(a1.getValue() || "").trim();
-    let rule = SpreadsheetApp.newDataValidation()
-      .requireValueInList(labels, true)
-      .setAllowInvalid(false)
-      .build();
-    a1.setDataValidation(rule);
-    if (labels.indexOf(current) === -1) {
-      a1.setValue(labels[0]);
+    if (!a1HasValidation) {
+      let labels = ORDER_SHEET_ACTION_MENU_.map((item) => item.label);
+      let rule = SpreadsheetApp.newDataValidation()
+        .requireValueInList(labels, true)
+        .setAllowInvalid(false)
+        .build();
+      a1.setDataValidation(rule);
+      let current = String(a1.getValue() || "").trim();
+      if (labels.indexOf(current) === -1) {
+        a1.setValue(labels[0]);
+      }
     }
 
-    let b1 = sheet.getRange(ORDER_SHEET_B1_TRIGGER_.row, ORDER_SHEET_B1_TRIGGER_.col);
-    if (b1.getDataValidation() == null) {
+    if (!b1HasValidation) {
       b1.insertCheckboxes();
       b1.setValue(false);
     }
@@ -2950,14 +3101,20 @@ const shouldLogManualAdjustmentEntry_ = (entry) => {
   return Math.abs(entry.qty - entry.aiQty) > 1e-6;
 };
 
-/** 確定コミット時にバックログの指定日付行を差し替え（sheetは店舗別に解決済みのものを渡す） */
-const replaceBacklogRowsForDate_ = (sheet, dateStr, newRowsForDate, storeName) => {
+/**
+ * 確定コミット時にバックログの指定日付行を差し替え（sheetは店舗別に解決済みのものを渡す）
+ * category省略時は従来通り同日付の行を分類問わず全置換。categoryを渡すと同日付・同分類の行だけを
+ * 置換し、他分類（例: 発注データ更新時の仕込み確定行）は保持する
+ * （Infomart発注バックログ化で、仕込みと発注が別々のタイミング・別関数から同日に書き込まれるため必要）。
+ */
+const replaceBacklogRowsForDate_ = (sheet, dateStr, newRowsForDate, storeName, category) => {
   if (!sheet) return 0;
 
   let meta = ensureBacklogSheetMeta_(sheet);
   if (!meta) return 0;
 
   let idxDate = meta.headers.indexOf("日付");
+  let idxCategory = meta.headers.indexOf("分類");
   let numCols = meta.numCols || meta.headers.length;
   let startRow = meta.dataStartRow + 1;
   let lastRow = sheet.getLastRow();
@@ -2968,7 +3125,9 @@ const replaceBacklogRowsForDate_ = (sheet, dateStr, newRowsForDate, storeName) =
     let rows = sheet.getRange(startRow, 1, numRows, numCols).getValues();
     for (let i = 0; i < rows.length; i++) {
       let rowDateStr = formatSheetDateToKey(rows[i][idxDate]);
-      if (rowDateStr !== dateStr) existing.push(rows[i]);
+      let isTarget = rowDateStr === dateStr
+        && (!category || idxCategory < 0 || String(rows[i][idxCategory]) === category);
+      if (!isTarget) existing.push(rows[i]);
     }
   }
 
@@ -2997,7 +3156,36 @@ const resolveBacklogMinQtyForCommit_ = (aiSnapshot, category, name, fallbackQty)
   return fallbackQty;
 };
 
-/** 指示書の確定内容からバックログ行を組み立てる */
+/**
+ * 指示書の確定内容からバックログ行を組み立てる（Infomart発注バックログ運用時のデフォルト経路）。
+ * 仕込みは従来通り（表示数量＝指示量を既定とし、確定量入力時のみそれを採用）。
+ * 発注は「O列手動入力」（指示書のAI提案発注リストに無い、Infomartを介さない例外的な手動発注）のみを
+ * 対象とし、AI提案の通常発注ブロック（readOrderSheetBlockRows_(..., "発注", ...)）は含めない
+ * （その分はimportInfomartOrderBacklogForDate_がInfomart実データから別途バックログへ書き込む）。
+ */
+const buildCommittedPrepAndManualOrderBacklogRows_ = (dateStr, orderSheet, aiSnapshot, rawMaster) => {
+  let baseFlag = aiSnapshot && aiSnapshot.baseFlag ? aiSnapshot.baseFlag : "予算ベース";
+  let rows = [];
+
+  readOrderSheetBlockRows_(orderSheet, "仕込み", aiSnapshot).forEach((entry) => {
+    let aiMin = resolveBacklogMinQtyForCommit_(aiSnapshot, "仕込み", entry.name, entry.qty);
+    rows.push([dateStr, entry.name, "仕込み", entry.qty, "", 0, aiMin, entry.qty, baseFlag]);
+  });
+
+  if (!rawMaster) {
+    rawMaster = loadRawMaterialMasterCached_(orderSheet.getParent());
+  }
+  readOrderSheetManualEntries(orderSheet, { rawMaster: rawMaster }).forEach((entry) => {
+    if (entry.qty <= 0) return;
+    let aiQty = aiSnapshot && aiSnapshot.order && aiSnapshot.order[entry.name]
+      ? aiSnapshot.order[entry.name].qty : entry.qty;
+    rows.push([dateStr, entry.name, "発注", entry.qty, "", 0, aiQty, entry.qty, baseFlag]);
+  });
+
+  return rows;
+};
+
+/** 指示書の確定内容からバックログ行を組み立てる（ロールバック用: 従来通り仕込み+発注AI提案ブロック両方） */
 const buildCommittedBacklogRows_ = (dateStr, orderSheet, aiSnapshot, rawMaster) => {
   let baseFlag = aiSnapshot && aiSnapshot.baseFlag ? aiSnapshot.baseFlag : "予算ベース";
   let rows = [];

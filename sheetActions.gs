@@ -656,6 +656,12 @@ const writePosCleanSheet = (cleanSheet, rows) => {
  * 確定コミット: バックログへ最終反映 + 手動調整を AI予測手動調整ログ へ出力
  * （対象店舗のタブを開いてから実行。チェックボックス経由なら自動解決）
  * バックログ・AI予測手動調整ログも店舗別タブ（storeSheets）から解決する。
+ *
+ * 発注バックログ取得元がInfomart（既定、getInfomartOrderBacklogSource_参照）の場合、
+ * 指示書の発注ブロック（AI提案リスト）はもう「確定」対象ではない
+ * （その分はimportInfomartOrderBacklogForDate_がInfomart実データから別途バックログへ書く）。
+ * ここでは仕込み（従来通り）とO列手動入力の発注（Infomartを介さない例外的な手動発注）のみ反映する。
+ * "manual"設定時は従来通り、仕込み・発注（AI提案ブロック含む）を丸ごと反映する（ロールバック用）。
  * @param {object} [storeSheets] resolveStoreSheetsFromActiveSheet_ 等で解決済みの店舗別シート一式
  */
 const commitOrderSheetToBacklogAndLog = (storeSheets) => {
@@ -683,13 +689,28 @@ const commitOrderSheetToBacklogAndLog = (storeSheets) => {
   let aiSnapshot = loadOrderSheetAiSnapshot_(dateStr, storeSheets.storeName);
   let rawMaster = loadRawMaterialMasterCached_(ss);
 
-  let backlogRows = buildCommittedBacklogRows_(dateStr, orderSheet, aiSnapshot, rawMaster);
-  let backlogCount = replaceBacklogRowsForDate_(backlogSheet, dateStr, backlogRows, storeSheets.storeName);
+  let useInfomartBacklog = getInfomartOrderBacklogSource_() === "infomart";
+  let backlogCount;
+  let manualAdjustmentCategories;
 
-  let entries = collectManualAdjustmentEntries(orderSheet, aiSnapshot, rawMaster);
+  if (useInfomartBacklog) {
+    let backlogRows = buildCommittedPrepAndManualOrderBacklogRows_(dateStr, orderSheet, aiSnapshot, rawMaster);
+    let prepRows = backlogRows.filter((r) => { return r[2] === "仕込み"; });
+    let orderRows = backlogRows.filter((r) => { return r[2] === "発注"; });
+    backlogCount = replaceBacklogRowsForDate_(backlogSheet, dateStr, prepRows, storeSheets.storeName, "仕込み")
+      + replaceBacklogRowsForDate_(backlogSheet, dateStr, orderRows, storeSheets.storeName, "発注");
+    manualAdjustmentCategories = ["仕込み"];
+  } else {
+    let backlogRows = buildCommittedBacklogRows_(dateStr, orderSheet, aiSnapshot, rawMaster);
+    backlogCount = replaceBacklogRowsForDate_(backlogSheet, dateStr, backlogRows, storeSheets.storeName);
+    manualAdjustmentCategories = ["仕込み", "発注"];
+  }
+
+  let entries = collectManualAdjustmentEntries(orderSheet, aiSnapshot, rawMaster, manualAdjustmentCategories);
   writeManualAdjustmentLogForDate(logSheet, dateStr, entries);
 
-  notifyUser(`確定コミット: ${dateStr} / バックログ ${backlogCount} 件 / 手動調整ログ ${entries.length} 件`);
+  notifyUser(`確定コミット: ${dateStr} / バックログ ${backlogCount} 件 / 手動調整ログ ${entries.length} 件`
+    + (useInfomartBacklog ? "（発注はInfomart実データ反映）" : ""));
 };
 
 /**
@@ -756,10 +777,15 @@ function resetBacklogRelatedHistory() {
   );
 }
 
-/** 指示書から手動調整ログ対象行を収集（AI予測との差分・変更量・理由・O4:Q15手動入力） */
-const collectManualAdjustmentEntries = (orderSheet, aiSnapshot, rawMaster) => {
+/**
+ * 指示書から手動調整ログ対象行を収集（AI予測との差分・変更量・理由・O4:Q15手動入力）
+ * @param {string[]} [categories] 対象ブロック（既定["仕込み","発注"]）。発注バックログが
+ *   Infomart化されている場合、指示書の発注ブロックはもう「確定」の対象ではないため
+ *   呼び出し元は["仕込み"]のみを渡す（O列手動入力の差分ログ自体はcategoriesに関わらず出る）。
+ */
+const collectManualAdjustmentEntries = (orderSheet, aiSnapshot, rawMaster, categories) => {
   let entries = [];
-  ["仕込み", "発注"].forEach((category) => {
+  (categories || ["仕込み", "発注"]).forEach((category) => {
     readOrderSheetBlockRows_(orderSheet, category, aiSnapshot).forEach((entry) => {
       if (shouldLogManualAdjustmentEntry_(entry)) entries.push(entry);
     });
