@@ -749,38 +749,50 @@ const resolveSalesMixReportMonths_ = (referenceDate) => {
   return { target: monthRange(1), compare: monthRange(2) };
 };
 
-/** 実績出数ログから、指定店舗・指定期間（yyyy-MM-dd範囲、両端含む）の商品別販売点数を集計 */
-const aggregateSalesQtyByProductForMonth_ = (logSheet, storeId, fromDateStr, toDateStr) => {
-  let totals = {};
-  let grandTotal = 0;
-  if (!logSheet) return { totals: totals, grandTotal: grandTotal };
+/**
+ * 実績出数ログ全体を1回だけ読み込み、店舗×期間(target/compare)×商品ごとの販売点数へ集計する。
+ * 店舗ごとに毎回シート全体を読み直すと（店舗数×2回）、ログが大きい場合に
+ * スプレッドシートサービスがタイムアウトすることがあったための一括集計版。
+ * @return {{ [storeId]: { target: {totals, grandTotal}, compare: {totals, grandTotal} } }}
+ */
+const aggregateSalesMixForAllStores_ = (logSheet, storeIds, target, compare) => {
+  let result = {};
+  storeIds.forEach((storeId) => {
+    result[storeId] = {
+      target: { totals: {}, grandTotal: 0 },
+      compare: { totals: {}, grandTotal: 0 }
+    };
+  });
+  if (!logSheet) return result;
 
   let lastRow = logSheet.getLastRow();
-  if (lastRow < 2) return { totals: totals, grandTotal: grandTotal };
+  if (lastRow < 2) return result;
 
   let values = logSheet.getRange(2, 1, lastRow - 1, ACTUAL_SALES_LOG_HEADERS_.length).getValues();
   values.forEach((row) => {
+    let bucket = result[String(row[1])];
+    if (!bucket) return; // 対象店舗以外の行は無視
+
     let rowDateStr = formatSheetDateToKey(row[0]);
-    if (!rowDateStr || rowDateStr < fromDateStr || rowDateStr > toDateStr) return;
-    if (String(row[1]) !== String(storeId)) return;
+    let periodKey = null;
+    if (rowDateStr && rowDateStr >= target.fromStr && rowDateStr <= target.toStr) periodKey = "target";
+    else if (rowDateStr && rowDateStr >= compare.fromStr && rowDateStr <= compare.toStr) periodKey = "compare";
+    if (!periodKey) return;
 
     let name = String(row[2] || "").trim();
     let qty = Number(row[3]) || 0;
     if (!name || qty === 0) return;
 
-    totals[name] = (totals[name] || 0) + qty;
-    grandTotal += qty;
+    let agg = bucket[periodKey];
+    agg.totals[name] = (agg.totals[name] || 0) + qty;
+    agg.grandTotal += qty;
   });
 
-  return { totals: totals, grandTotal: grandTotal };
+  return result;
 };
 
 /** 対象月・比較月それぞれの構成比を商品ごとに並べる（対象月の構成比が大きい順） */
-const buildSalesMixComparisonRows_ = (ss, storeId, target, compare) => {
-  let logSheet = ss.getSheetByName(SHEET_NAMES.ACTUAL_SALES_LOG);
-  let targetAgg = aggregateSalesQtyByProductForMonth_(logSheet, storeId, target.fromStr, target.toStr);
-  let compareAgg = aggregateSalesQtyByProductForMonth_(logSheet, storeId, compare.fromStr, compare.toStr);
-
+const buildSalesMixComparisonRows_ = (targetAgg, compareAgg) => {
   let names = {};
   Object.keys(targetAgg.totals).forEach((n) => { names[n] = true; });
   Object.keys(compareAgg.totals).forEach((n) => { names[n] = true; });
@@ -821,6 +833,8 @@ const writeSalesMixReportSheet_ = (sheet, target, compare, rows) => {
 
 /**
  * 全店舗ぶん、商品構成比レポート（対象月=前月 vs 比較月=前々月）を生成する（毎月1日ごろの自動トリガー本体）
+ * 実績出数ログは一括で1回だけ読み込み、そこから対象月・比較月ぶんを店舗ごとに抽出する
+ * （店舗数ぶん読み直すとログが大きい場合にスプレッドシートサービスがタイムアウトすることがあったため）。
  * 元データは実績出数ログ（90日保持）のため、比較月がその範囲外になっている場合は0件になる点に注意。
  */
 const runMonthlySalesMixReportForAllStores = () => {
@@ -832,6 +846,10 @@ const runMonthlySalesMixReportForAllStores = () => {
   }
 
   let months = resolveSalesMixReportMonths_(new Date());
+  let storeIds = stores.map((store) => { return String(store.storeId); });
+  let logSheet = ss.getSheetByName(SHEET_NAMES.ACTUAL_SALES_LOG);
+  let aggByStore = aggregateSalesMixForAllStores_(logSheet, storeIds, months.target, months.compare);
+
   let succeeded = [];
   let failed = [];
 
@@ -839,7 +857,8 @@ const runMonthlySalesMixReportForAllStores = () => {
     let storeName = String(store.storeName || "").trim();
     try {
       if (!storeName) throw new Error(`storeId=${store.storeId} は店舗名が空です`);
-      let rows = buildSalesMixComparisonRows_(ss, store.storeId, months.target, months.compare);
+      let agg = aggByStore[String(store.storeId)];
+      let rows = buildSalesMixComparisonRows_(agg.target, agg.compare);
       let sheet = ensureSalesMixReportSheet_(ss, storeName);
       writeSalesMixReportSheet_(sheet, months.target, months.compare, rows);
       succeeded.push(storeName);
