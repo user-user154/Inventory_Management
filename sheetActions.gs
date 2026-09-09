@@ -22,20 +22,39 @@ const getCheckboxAction_ = (action) => {
 
 /** シンプルトリガー onEdit（インストール型と併用、Lock で二重実行防止） */
 function onEdit(e) {
-  handleSpreadsheetEdit_(e);
+  handleSpreadsheetEdit_(e, false);
 }
 
 /** インストール型 onEdit（oldValue 利用・実行時間延長） */
 function onEditInstallable(e) {
-  handleSpreadsheetEdit_(e);
+  handleSpreadsheetEdit_(e, true);
 }
+
+/**
+ * 指示書 B1 のチェックボックス実行（オフ→オン）かどうかだけを、ロックを取らず副作用なしで判定する。
+ * シンプルトリガー側でこれを検知したら即座に抜けることで、実行時間の短いシンプルトリガーが
+ * ロックを取ってしまい、後発のインストール型トリガー（実行時間が長い）に処理を譲れなくなる
+ * 早い者勝ちのレースを避ける（同一編集イベントに対しインストール型は別途必ず発火するため、
+ * シンプルトリガー側で何もしなくても計算は実行される）。
+ */
+const looksLikeHeavyOrderSheetCheckboxEdit_ = (e) => {
+  if (!e || !e.range) return false;
+  let sheet = e.range.getSheet();
+  if (!sheet || !isOrderFormSheetName_(sheet.getName())) return false;
+  if (isOrderSheetManualInputEdit_(e)) return false;
+  return !!isSheetCheckboxTriggerEdit_(e, [ORDER_SHEET_B1_TRIGGER_]);
+};
 
 /**
  * 編集トリガー本体
  * 計算系はチェックボックスのオフ→オンのみ。それ以外の自動実行はしない。
+ * @param {boolean} isInstallable インストール型（長時間実行）からの呼び出しか
  */
-const handleSpreadsheetEdit_ = (e) => {
+const handleSpreadsheetEdit_ = (e, isInstallable) => {
   if (!e || !e.range) return;
+
+  // 重い処理（指示書チェックボックス実行）はインストール型トリガーにのみ担当させる。
+  if (!isInstallable && looksLikeHeavyOrderSheetCheckboxEdit_(e)) return;
 
   let lock = LockService.getScriptLock();
   if (!lock.tryLock(0)) return;
