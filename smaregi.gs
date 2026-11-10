@@ -24,9 +24,13 @@ const ACTUAL_SALES_LOG_HEADERS_ = ["日付", "店舗", "統一商品名", "販�
 /**
  * まだ運用（店舗別シート整備・原材料マスタ登録等）が完了していない業態は、
  * 夜間の全店舗自動実行（runDailyPosImportAndPlanNextDay）でPOSデータ取得の対象から除外する。
- * 準備が整い次第ここから名前を外せば自動的に対象に含まれるようになる。
+ * 実際の店舗名はコードに書かず、スクリプトプロパティ POS_STORE_EXCLUDE_LIST にカンマ区切りで
+ * 設定する（例: "店舗A,店舗B"）。準備が整い次第プロパティから名前を外せば自動的に対象に含まれる。
  */
-const SMAREGI_STORE_EXCLUDE_LIST_ = ["店舗D"];
+const getSmaregiStoreExcludeList_ = () => {
+  let raw = PropertiesService.getScriptProperties().getProperty("POS_STORE_EXCLUDE_LIST") || "";
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+};
 
 /**
  * 実績出数ログの保持日数。シミュレーション側が参照するのは商品別バイアス係数の
@@ -53,6 +57,18 @@ const getSmaregiCredentials_ = () => {
     );
   }
   return { clientId: clientId, clientSecret: clientSecret };
+};
+
+/** スクリプトプロパティから契約IDを読む（未設定ならエラー。契約を一意に特定できる値のためコードに書かない） */
+const getSmaregiContractId_ = () => {
+  let contractId = PropertiesService.getScriptProperties().getProperty("POS_CONTRACT_ID");
+  if (!contractId) {
+    throw new Error(
+      "スクリプトプロパティに POS_CONTRACT_ID が設定されていません。"
+      + "プロジェクトの設定 → スクリプトプロパティ から登録してください。"
+    );
+  }
+  return contractId;
 };
 
 /**
@@ -98,7 +114,7 @@ const getSmaregiAccessToken_ = (scope) => {
   if (cached) return cached;
 
   let cred = getSmaregiCredentials_();
-  let tokenUrl = `${SMAREGI_CONFIG.idBase}/app/${SMAREGI_CONFIG.contractId}/token`;
+  let tokenUrl = `${SMAREGI_CONFIG.idBase}/app/${getSmaregiContractId_()}/token`;
   let basic = Utilities.base64Encode(`${cred.clientId}:${cred.clientSecret}`);
 
   let res = UrlFetchApp.fetch(tokenUrl, {
@@ -134,7 +150,7 @@ const extractSmaregiListFromResponse_ = (json) => {
 /** 店舗一覧を取得（GET /stores、ページング対応） */
 const getSmaregiStores_ = () => {
   let token = getSmaregiAccessToken_("pos.stores:read");
-  let baseUrl = `${SMAREGI_CONFIG.apiBase}/${SMAREGI_CONFIG.contractId}/pos/stores`;
+  let baseUrl = `${SMAREGI_CONFIG.apiBase}/${getSmaregiContractId_()}/pos/stores`;
   let stores = [];
   let limit = 100;
 
@@ -228,7 +244,7 @@ const fetchSmaregiTransactions_ = (dateStr, storeId) => {
   let token = getSmaregiAccessToken_("pos.transactions:read");
   let fromIso = `${dateStr}T00:00:00+09:00`;
   let toIso = `${dateStr}T23:59:59+09:00`;
-  let baseUrl = `${SMAREGI_CONFIG.apiBase}/${SMAREGI_CONFIG.contractId}/pos/transactions`;
+  let baseUrl = `${SMAREGI_CONFIG.apiBase}/${getSmaregiContractId_()}/pos/transactions`;
 
   let allTransactions = [];
   let limit = 100;
@@ -407,7 +423,7 @@ const runDailyPosImportAndPlanNextDay = () => {
   let tomorrow = addDaysToDateStr_(today, 1);
   let queue = stores
     .map((s) => ({ storeId: s.storeId, storeName: String(s.storeName || "").trim() }))
-    .filter((s) => SMAREGI_STORE_EXCLUDE_LIST_.indexOf(s.storeName) === -1);
+    .filter((s) => getSmaregiStoreExcludeList_().indexOf(s.storeName) === -1);
 
   if (queue.length === 0) {
     notifyUser("対象店舗が0件でした（除外リストで全店舗が対象外になっていないか確認してください）。");

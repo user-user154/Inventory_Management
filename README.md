@@ -77,7 +77,8 @@ clasp pull   # または clasp push でこのリポジトリの内容をGASへ�
 
 スクリプトプロパティ（Apps Scriptエディタ → プロジェクトの設定）に以下を設定する（値はコードにもリポジトリにも含めない）：
 
-- `POS_CLIENT_ID` / `POS_CLIENT_SECRET`（スマレジ）
+- `POS_CLIENT_ID` / `POS_CLIENT_SECRET` / `POS_CONTRACT_ID`（スマレジ。契約IDも契約を一意に特定できる値のためコードには書かずここに設定する）
+- `POS_STORE_EXCLUDE_LIST`（任意。夜間自動実行の対象から外す店舗名をカンマ区切りで設定。例: "店舗A,店舗B"）
 - `INFOMART_CLIENT_ID` / `INFOMART_CLIENT_SECRET`（Infomart）、店舗ごとのPFIDは menu「InfomartのPFIDを登録」から登録
 
 ## 運用の起点

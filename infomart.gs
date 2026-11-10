@@ -839,7 +839,7 @@ const writeInfomartOrderDeliveryLogForRange_ = (sheet, rangeKey, storeName, rows
 
 /**
  * 取引1件（trade、伝票1枚に相当）を「明細1行=1行」に展開する（請求書側のflattenInfomartInvoiceToRows_と対）
- * フィールド名は2026-08-25に実データ（屋号B店、target_date_set=2、93件・明細334行）で
+ * フィールド名は2026-08-25に実店舗の実データ（target_date_set=2、93件・明細334行）で
  * 確認済み。数量は item_number ではなく prod_lot_qty（＝order_prod_lot_qty、常に同値）を使うこと。
  * item_number は空欄になる明細も多く、prod_lot_qty×prod_lot_price=prod_lot_total の関係が常に成立する
  * ことを実データで確認して切り分けた（item_numberは数量ではなく別の意味の項目と判断）。

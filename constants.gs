@@ -26,10 +26,10 @@ const SHEET_NAMES = {
 const SALES_TAX_RATE = 0.10;
 const POS_SALES_HEADER_EX_TAX = "純売上(税抜)";
 
-/** スマレジ・プラットフォームAPI 接続先（本番。契約IDはシークレットではないためここに置く。
+/** スマレジ・プラットフォームAPI 接続先（本番。契約IDは契約を一意に特定できる値のため
+ *  コードに書かずスクリプトプロパティ POS_CONTRACT_ID に設定する（getSmaregiContractId_ 参照）。
  *  クライアントID/シークレットはスクリプトプロパティ POS_CLIENT_ID / POS_CLIENT_SECRET） */
 const SMAREGI_CONFIG = {
-  contractId: "YOUR_CONTRACT_ID",
   idBase: "https://id.smaregi.jp",
   apiBase: "https://api.smaregi.jp"
 };
